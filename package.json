@@ -1,0 +1,49 @@
+{
+  "name": "codex-cli-qq",
+  "version": "0.2.0",
+  "description": "QQ C2C/group bridge for Codex CLI with session management, progress updates, attachments, and self-hosted long-running service support.",
+  "author": "ankadada",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "codex",
+    "qq",
+    "bot",
+    "bridge",
+    "automation",
+    "chatops",
+    "openai",
+    "self-hosted"
+  ],
+  "homepage": "https://github.com/ankadada/CodeX-to-QQ#readme",
+  "bugs": {
+    "url": "https://github.com/ankadada/CodeX-to-QQ/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ankadada/CodeX-to-QQ.git"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "check": "node --check src/index.js && node --check src/context-compaction.js && node --check src/text-splitter.js && node --check scripts/doctor.mjs",
+    "test": "node --test",
+    "ci": "npm run check && npm test",
+    "doctor": "node scripts/doctor.mjs",
+    "install:service": "bash scripts/install-service.sh",
+    "install:launchd": "bash scripts/install-launchd.sh",
+    "install:systemd": "bash scripts/install-systemd.sh",
+    "service:status": "bash scripts/status-service.sh",
+    "service:status:launchd": "bash scripts/status-launchd.sh",
+    "service:status:systemd": "bash scripts/status-systemd.sh",
+    "logs": "bash scripts/logs-service.sh",
+    "logs:launchd": "tail -n 120 -f logs/codex-cli-qq.log",
+    "logs:systemd": "journalctl --user -u codex-cli-qq.service -f"
+  },
+  "dependencies": {
+    "dotenv": "^16.6.1",
+    "ws": "^8.18.0"
+  }
+}
