@@ -8,6 +8,8 @@
 
 [中文说明](./README_CN.md) · [Security](./SECURITY.md) · [Contributing](./CONTRIBUTING.md) · [Changelog](./CHANGELOG.md)
 
+![CodeX-to-QQ Logo](./docs/assets/logo.svg)
+
 Self-hosted `QQ -> Codex CLI` bridge for private chat and group `@bot` workflows.
 
 It is designed for people who want to talk to Codex from QQ while keeping sessions, workspaces, long-running service behavior, and attachment handling under their own control.

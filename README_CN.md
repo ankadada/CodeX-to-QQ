@@ -8,6 +8,8 @@
 
 [English](./README.md) · [安全说明](./SECURITY.md) · [贡献指南](./CONTRIBUTING.md) · [更新记录](./CHANGELOG.md)
 
+![CodeX-to-QQ Logo](./docs/assets/logo.svg)
+
 这是一个自建的 `QQ -> Codex CLI` 桥接服务，适合把 Codex 接进 QQ 单聊或群聊 `@bot` 工作流里使用。
 
 它的目标不是一次性 demo，而是做成一个适合长期运行的桥接层：会话、工作区、进展反馈、附件处理、后台服务、诊断与审计都尽量补齐。
