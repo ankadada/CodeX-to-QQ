@@ -1,4 +1,12 @@
-# codex-cli-qq
+# CodeX-to-QQ
+
+[![CI](https://github.com/ankadada/CodeX-to-QQ/actions/workflows/ci.yml/badge.svg)](https://github.com/ankadada/CodeX-to-QQ/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/ankadada/CodeX-to-QQ)](./LICENSE)
+[![Node](https://img.shields.io/badge/node-%3E%3D20-3C873A)](https://nodejs.org/)
+[![Release](https://img.shields.io/badge/release-v0.2.0-2563EB)](./docs/releases/v0.2.0.md)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-111827)](./README.md#supported-platforms)
+
+[中文说明](./README_CN.md) · [Security](./SECURITY.md) · [Contributing](./CONTRIBUTING.md) · [Changelog](./CHANGELOG.md)
 
 Self-hosted `QQ -> Codex CLI` bridge for private chat and group `@bot` workflows.
 
@@ -15,6 +23,16 @@ It is designed for people who want to talk to Codex from QQ while keeping sessio
 - context compaction and retry-on-stale-session behavior
 - quick-action keyboards for short control messages
 - launchd support on macOS and systemd user-service support on Linux
+
+## Screenshots
+
+### Chat UX
+
+![Chat UX](./docs/assets/hero-chat.svg)
+
+### Session / Diagnostics / Profiles
+
+![Session / Diagnostics / Profiles](./docs/assets/session-tools.svg)
 
 ## Who this is for
 

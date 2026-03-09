@@ -1,0 +1,52 @@
+<svg width="1280" height="820" viewBox="0 0 1280 820" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1280" height="820" rx="32" fill="#0F172A"/>
+  <rect x="56" y="56" width="1168" height="708" rx="28" fill="#111827"/>
+
+  <text x="96" y="124" fill="white" font-family="Arial, sans-serif" font-size="34" font-weight="700">Session / Diagnostics / Profiles</text>
+  <text x="96" y="160" fill="#94A3B8" font-family="Arial, sans-serif" font-size="19">适合放在 README 首页的功能概览图</text>
+
+  <rect x="96" y="206" width="344" height="500" rx="24" fill="#1F2937"/>
+  <text x="126" y="254" fill="#F8FAFC" font-family="Arial, sans-serif" font-size="25" font-weight="700">会话控制</text>
+  <rect x="126" y="284" width="284" height="80" rx="18" fill="#1D4ED8"/>
+  <text x="152" y="322" fill="white" font-family="Arial, sans-serif" font-size="20" font-weight="700">/new</text>
+  <text x="220" y="322" fill="#DBEAFE" font-family="Arial, sans-serif" font-size="16">主动开启新会话</text>
+  <rect x="126" y="382" width="284" height="80" rx="18" fill="#7C3AED"/>
+  <text x="152" y="420" fill="white" font-family="Arial, sans-serif" font-size="20" font-weight="700">/sessions</text>
+  <text x="272" y="420" fill="#EDE9FE" font-family="Arial, sans-serif" font-size="16">查看历史会话</text>
+  <rect x="126" y="480" width="284" height="80" rx="18" fill="#059669"/>
+  <text x="152" y="518" fill="white" font-family="Arial, sans-serif" font-size="20" font-weight="700">/resume</text>
+  <text x="264" y="518" fill="#D1FAE5" font-family="Arial, sans-serif" font-size="16">切回指定会话</text>
+  <rect x="126" y="578" width="284" height="80" rx="18" fill="#DC2626"/>
+  <text x="152" y="616" fill="white" font-family="Arial, sans-serif" font-size="20" font-weight="700">/stop</text>
+  <text x="228" y="616" fill="#FEE2E2" font-family="Arial, sans-serif" font-size="16">终止当前任务</text>
+
+  <rect x="470" y="206" width="324" height="500" rx="24" fill="#1F2937"/>
+  <text x="500" y="254" fill="#F8FAFC" font-family="Arial, sans-serif" font-size="25" font-weight="700">运维诊断</text>
+  <text x="500" y="312" fill="#CBD5E1" font-family="Arial, sans-serif" font-size="18">/diag</text>
+  <text x="500" y="346" fill="#CBD5E1" font-family="Arial, sans-serif" font-size="18">- 网关 session / 最近错误</text>
+  <text x="500" y="378" fill="#CBD5E1" font-family="Arial, sans-serif" font-size="18">- 当前排队 / 是否处理中</text>
+  <text x="500" y="410" fill="#CBD5E1" font-family="Arial, sans-serif" font-size="18">- 收发消息计数</text>
+  <text x="500" y="464" fill="#CBD5E1" font-family="Arial, sans-serif" font-size="18">/stats</text>
+  <text x="500" y="498" fill="#CBD5E1" font-family="Arial, sans-serif" font-size="18">- 完成 / 失败 / 取消任务统计</text>
+  <text x="500" y="530" fill="#CBD5E1" font-family="Arial, sans-serif" font-size="18">- 运行时长与审计数量</text>
+  <text x="500" y="584" fill="#CBD5E1" font-family="Arial, sans-serif" font-size="18">/audit</text>
+  <text x="500" y="618" fill="#CBD5E1" font-family="Arial, sans-serif" font-size="18">- 最近入站 / 出站 / 撤回 / 失败记录</text>
+
+  <rect x="824" y="206" width="360" height="500" rx="24" fill="#1F2937"/>
+  <text x="854" y="254" fill="#F8FAFC" font-family="Arial, sans-serif" font-size="25" font-weight="700">Profile 模式</text>
+  <rect x="854" y="288" width="300" height="62" rx="16" fill="#334155"/>
+  <text x="878" y="326" fill="white" font-family="Arial, sans-serif" font-size="19" font-weight="700">default</text>
+  <text x="992" y="326" fill="#CBD5E1" font-family="Arial, sans-serif" font-size="16">通用默认配置</text>
+  <rect x="854" y="366" width="300" height="62" rx="16" fill="#1D4ED8"/>
+  <text x="878" y="404" fill="white" font-family="Arial, sans-serif" font-size="19" font-weight="700">code</text>
+  <text x="968" y="404" fill="#DBEAFE" font-family="Arial, sans-serif" font-size="16">偏重代码与修复</text>
+  <rect x="854" y="444" width="300" height="62" rx="16" fill="#0F766E"/>
+  <text x="878" y="482" fill="white" font-family="Arial, sans-serif" font-size="19" font-weight="700">docs</text>
+  <text x="968" y="482" fill="#CCFBF1" font-family="Arial, sans-serif" font-size="16">偏重文档与整理</text>
+  <rect x="854" y="522" width="300" height="62" rx="16" fill="#7C3AED"/>
+  <text x="878" y="560" fill="white" font-family="Arial, sans-serif" font-size="19" font-weight="700">review</text>
+  <text x="982" y="560" fill="#EDE9FE" font-family="Arial, sans-serif" font-size="16">偏重审查与分析</text>
+  <rect x="854" y="600" width="300" height="62" rx="16" fill="#EA580C"/>
+  <text x="878" y="638" fill="white" font-family="Arial, sans-serif" font-size="19" font-weight="700">image</text>
+  <text x="980" y="638" fill="#FFEDD5" font-family="Arial, sans-serif" font-size="16">偏重截图与多模态</text>
+</svg>
