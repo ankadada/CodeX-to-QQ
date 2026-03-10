@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
@@ -13,10 +14,82 @@ import {
   buildPromptFromCompactedContext,
   shouldCompactByTokens,
 } from './context-compaction.js';
+import {
+  clearPinnedSessionHistory,
+  createAutoSessionTitle,
+  findSessionHistoryItem,
+  normalizeSessionHistory,
+  pinSessionHistory,
+  renameSessionHistory,
+  upsertSessionHistory,
+} from './session-history.js';
+import {
+  formatQuickActionCapability,
+  isQuickActionUnsupportedError,
+  markQuickActionsSupported,
+  markQuickActionsUnsupported,
+  normalizeQuickActionCapability,
+  shouldAttemptQuickActions,
+} from './quick-actions.js';
+import {
+  commitWorkspace,
+  ensureWorkspaceGitRepo,
+  getDiffReport,
+  getRepoLog,
+  getRepoStatus,
+  rollbackWorkspace,
+  switchBranch,
+} from './workspace-git.js';
+import {
+  buildHelpMessage,
+  buildUnknownCommandMessage,
+} from './help-message.js';
+import {
+  normalizeImageOcrMode,
+  shouldAttemptImageOcr,
+} from './image-ocr.js';
+import {
+  cleanupExpiredPendingActions,
+  consumePendingAction,
+  createPendingAction,
+  getLatestPendingAction,
+  listPendingActions,
+  peekPendingAction,
+} from './pending-actions.js';
+import {
+  createGatewayRuntimeState,
+  DEFAULT_GATEWAY_HEARTBEAT_ACK_GRACE_MS,
+  forceGatewayFreshIdentify,
+  isGatewayHeartbeatOverdue,
+  noteGatewayClose,
+  noteGatewayHeartbeatAck,
+  noteGatewayHeartbeatSent,
+  noteGatewayHello,
+  noteGatewayIdentifyAttempt,
+  noteGatewayReady,
+  noteGatewayReconnectRequested,
+  noteGatewayResumeAttempt,
+  resolveGatewayReconnectDelay,
+  shouldAttemptGatewayResume,
+  shouldResetReconnectBackoff,
+} from './gateway-resilience.js';
+import {
+  createTextShortcutMenu,
+  formatTextShortcutHint,
+  isTextShortcutMenuExpired,
+  resolveTextShortcutCommand,
+} from './text-shortcuts.js';
+import {
+  exportWorkspaceDiff,
+  getPatchArtifact,
+  listChangedFiles,
+  openWorkspaceFile,
+} from './workspace-artifacts.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT = path.resolve(__dirname, '..');
+const APP_VERSION = readPackageVersion();
 const DATA_DIR = path.join(ROOT, 'data');
 const STATE_FILE = path.join(DATA_DIR, 'state.json');
 const LOCK_FILE = path.join(DATA_DIR, 'bot.lock');
@@ -41,9 +114,13 @@ const MAX_ATTACHMENTS_PER_MESSAGE = normalizePositiveInt(process.env.MAX_ATTACHM
 const MAX_IMAGE_ATTACHMENTS = normalizePositiveInt(process.env.MAX_IMAGE_ATTACHMENTS, 4);
 const MAX_ATTACHMENT_BYTES = normalizePositiveInt(process.env.MAX_ATTACHMENT_BYTES, 25 * 1024 * 1024);
 const EXTRACT_ATTACHMENT_TEXT = String(process.env.EXTRACT_ATTACHMENT_TEXT || 'true').toLowerCase() !== 'false';
+const IMAGE_OCR_MODE = normalizeImageOcrMode(process.env.IMAGE_OCR_MODE || 'auto');
+const MAX_IMAGE_OCR_CHARS_PER_FILE = normalizePositiveInt(process.env.MAX_IMAGE_OCR_CHARS_PER_FILE, 1200);
 const MAX_EXTRACTED_TEXT_CHARS_PER_FILE = normalizePositiveInt(process.env.MAX_EXTRACTED_TEXT_CHARS_PER_FILE, 4000);
 const MAX_EXTRACTED_TEXT_TOTAL_CHARS = normalizePositiveInt(process.env.MAX_EXTRACTED_TEXT_TOTAL_CHARS, 12000);
 const RECENT_FILES_MAX = 20;
+const SESSION_HISTORY_MAX = 20;
+const WORKSPACE_HISTORY_MAX = 8;
 const MAX_GLOBAL_ACTIVE_RUNS = normalizeQueueLimit(process.env.MAX_GLOBAL_ACTIVE_RUNS, 2);
 const COMPACT_CONTEXT_ON_THRESHOLD = String(process.env.COMPACT_CONTEXT_ON_THRESHOLD || 'true').toLowerCase() !== 'false';
 const SEND_ACK_ON_RECEIVE = String(process.env.SEND_ACK_ON_RECEIVE || 'true').toLowerCase() !== 'false';
@@ -54,8 +131,14 @@ const PHASE_PROGRESS_NOTIFY = String(process.env.PHASE_PROGRESS_NOTIFY || 'true'
 const MAX_PHASE_PROGRESS_NOTICES = normalizeQueueLimit(process.env.MAX_PHASE_PROGRESS_NOTICES, 3);
 const MIN_PHASE_PROGRESS_NOTIFY_MS = normalizeTimeoutMs(process.env.MIN_PHASE_PROGRESS_NOTIFY_MS, 5000);
 const ENABLE_QUICK_ACTIONS = String(process.env.ENABLE_QUICK_ACTIONS || 'true').toLowerCase() !== 'false';
+const QUICK_ACTION_RETRY_MS = normalizeTimeoutMs(process.env.QUICK_ACTION_RETRY_MS, 6 * 60 * 60 * 1000);
 const RETRACT_PROGRESS_MESSAGES = String(process.env.RETRACT_PROGRESS_MESSAGES || 'false').toLowerCase() !== 'false';
 const DELIVERY_AUDIT_MAX = normalizeQueueLimit(process.env.DELIVERY_AUDIT_MAX, 120);
+const QQ_API_TIMEOUT_MS = normalizeTimeoutMs(process.env.QQ_API_TIMEOUT_MS, 15000);
+const QQ_DOWNLOAD_TIMEOUT_MS = normalizeTimeoutMs(process.env.QQ_DOWNLOAD_TIMEOUT_MS, 30000);
+const TEXT_SHORTCUT_TTL_MS = normalizeTimeoutMs(process.env.TEXT_SHORTCUT_TTL_MS, 10 * 60 * 1000);
+const GATEWAY_HEARTBEAT_ACK_GRACE_MS = DEFAULT_GATEWAY_HEARTBEAT_ACK_GRACE_MS;
+const PENDING_ACTION_TTL_MS = normalizeTimeoutMs(process.env.PENDING_ACTION_TTL_MS, 10 * 60 * 1000);
 
 const TOKEN_URL = 'https://bots.qq.com/app/getAppAccessToken';
 const API_BASE = 'https://api.sgroup.qq.com';
@@ -71,6 +154,7 @@ const INBOUND_DEDUPE_TTL_MS = 10 * 60 * 1000;
 const INBOUND_DEDUPE_MAX = 2000;
 const LOG_HISTORY_MAX = 20;
 const ACTIVITY_HISTORY_MAX = 8;
+const BOOT_LOG_MARKER = '=== CodeX-to-QQ boot ===';
 
 let lockFd = null;
 let cachedToken = null;
@@ -80,6 +164,8 @@ let reconnectTimer = null;
 let reconnectIndex = 0;
 let stopped = false;
 let gatewayConnectionSeq = 0;
+const gatewayRuntime = createGatewayRuntimeState();
+let cachedImageOcrBackend = undefined;
 
 ensureDir(DATA_DIR);
 ensureDir(WORKSPACE_ROOT);
@@ -96,13 +182,17 @@ if (!codexHealth.ok) {
   process.exit(1);
 }
 
+console.log(`${BOOT_LOG_MARKER} ${new Date().toISOString()}`);
+console.error(`${BOOT_LOG_MARKER} ${new Date().toISOString()}`);
 console.log(`🧩 Codex CLI: ${codexHealth.version} via ${codexHealth.bin}`);
+console.log(`🚀 CodeX-to-QQ: v${APP_VERSION}`);
 console.log(`🤖 QQ bot mode: ${QQBOT_ENABLE_GROUP ? 'c2c + group@' : 'c2c only'}`);
 console.log(`🔐 default mode: ${DEFAULT_MODE}`);
 console.log(`🗂️ workspace root: ${WORKSPACE_ROOT}`);
 console.log(`📦 queue limit per peer: ${MAX_QUEUE_PER_PEER === 0 ? 'unlimited' : MAX_QUEUE_PER_PEER}`);
 console.log(`📎 attachments: ${DOWNLOAD_ATTACHMENTS ? `download on (max ${MAX_ATTACHMENTS_PER_MESSAGE}, ${formatBytes(MAX_ATTACHMENT_BYTES)})` : 'prompt url only'}`);
 console.log(`📄 text extraction: ${EXTRACT_ATTACHMENT_TEXT ? `on (${MAX_EXTRACTED_TEXT_CHARS_PER_FILE}/${MAX_EXTRACTED_TEXT_TOTAL_CHARS} chars)` : 'off'}`);
+console.log(`🖼️ image OCR: ${IMAGE_OCR_MODE}`);
 console.log(`🚦 global concurrency: ${MAX_GLOBAL_ACTIVE_RUNS === 0 ? 'unlimited' : MAX_GLOBAL_ACTIVE_RUNS}`);
 console.log(`🗜️ context compaction: ${COMPACT_CONTEXT_ON_THRESHOLD ? 'on' : 'off'}`);
 console.log(`💬 receive ack: ${SEND_ACK_ON_RECEIVE ? 'on' : 'off'}`);
@@ -110,7 +200,10 @@ console.log(`📮 proactive final reply after: ${PROACTIVE_FINAL_REPLY_AFTER_MS 
 console.log(`⏱️ auto progress ping: ${AUTO_PROGRESS_PING_MS > 0 && MAX_AUTO_PROGRESS_PINGS !== 0 ? `${AUTO_PROGRESS_PING_MS}ms × ${MAX_AUTO_PROGRESS_PINGS}` : 'off'}`);
 console.log(`🛰️ milestone progress notify: ${PHASE_PROGRESS_NOTIFY && MAX_PHASE_PROGRESS_NOTICES !== 0 ? `on (${MAX_PHASE_PROGRESS_NOTICES}, min ${MIN_PHASE_PROGRESS_NOTIFY_MS}ms)` : 'off'}`);
 console.log(`🎛️ quick actions: ${ENABLE_QUICK_ACTIONS ? 'on' : 'off'}`);
+console.log(`🔁 quick-action retry window: ${ENABLE_QUICK_ACTIONS ? (QUICK_ACTION_RETRY_MS > 0 ? `${QUICK_ACTION_RETRY_MS}ms` : 'disabled after first unsupported error') : 'off'}`);
 console.log(`🧹 retract progress cards: ${RETRACT_PROGRESS_MESSAGES ? 'on' : 'off'}`);
+console.log(`⌨️ text shortcut menu: ${TEXT_SHORTCUT_TTL_MS > 0 ? `${TEXT_SHORTCUT_TTL_MS}ms` : 'off'}`);
+console.log(`🌐 QQ API timeout: ${QQ_API_TIMEOUT_MS > 0 ? `${QQ_API_TIMEOUT_MS}ms` : 'off'} | download timeout: ${QQ_DOWNLOAD_TIMEOUT_MS > 0 ? `${QQ_DOWNLOAD_TIMEOUT_MS}ms` : 'off'}`);
 
 const state = loadState();
 const peerRuntimes = new Map();
@@ -127,13 +220,19 @@ process.on('exit', releaseLock);
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
-startGateway().catch((err) => {
-  console.error('Fatal gateway error:', safeError(err));
-  process.exit(1);
-});
+void startGateway();
 
 async function startGateway() {
-  await connect();
+  try {
+    await connect();
+  } catch (err) {
+    console.error('Initial gateway connect failed:', safeError(err));
+    state.gateway.lastError = safeError(err);
+    saveState();
+    if (!stopped) {
+      scheduleReconnect();
+    }
+  }
 }
 
 async function connect() {
@@ -142,6 +241,8 @@ async function connect() {
   const previousSocket = ws;
   ws = null;
   closeGatewaySocket(previousSocket, 'replace-before-reconnect');
+  gatewayRuntime.connectionOpenedAt = 0;
+  gatewayRuntime.awaitingHeartbeatAck = false;
 
   const accessToken = await getAccessToken();
   const gatewayUrl = await getGatewayUrl(accessToken);
@@ -156,7 +257,7 @@ async function connect() {
       closeGatewaySocket(socket, 'stale-open');
       return;
     }
-    reconnectIndex = 0;
+    gatewayRuntime.connectionOpenedAt = Date.now();
     console.log(`✅ QQ gateway connected (#${connectionId})`);
   });
 
@@ -182,10 +283,17 @@ async function connect() {
     ws = null;
     clearHeartbeat();
     state.gateway.lastError = `closed ${code} ${String(reason || '')}`.trim();
+    noteGatewayClose(gatewayRuntime, code, String(reason || ''), Date.now());
     handleGatewayCloseCode(code);
     saveState();
     if (!stopped) {
-      scheduleReconnect(resolveReconnectDelay(code));
+      scheduleReconnect(resolveGatewayReconnectDelay({
+        code,
+        reconnectIndex,
+        sessionTimeoutStreak: gatewayRuntime.sessionTimeoutStreak,
+        reconnectRequestedStreak: gatewayRuntime.reconnectRequestedStreak,
+        defaultDelays: RECONNECT_DELAYS,
+      }));
     }
   });
 
@@ -208,8 +316,10 @@ async function handleWsPayload(payload, socket, connectionId) {
     case 10: {
       const accessToken = await getAccessToken();
       const interval = payload?.d?.heartbeat_interval || 30000;
+      noteGatewayHello(gatewayRuntime, interval, Date.now());
       startHeartbeat(socket, interval);
-      if (state.gateway.sessionId && Number.isFinite(state.gateway.lastSeq)) {
+      if (shouldAttemptGatewayResume(state.gateway, gatewayRuntime, Date.now())) {
+        noteGatewayResumeAttempt(gatewayRuntime, Date.now());
         socket.send(JSON.stringify({
           op: 6,
           d: {
@@ -220,6 +330,7 @@ async function handleWsPayload(payload, socket, connectionId) {
         }));
         console.log(`🔄 Attempting resume (#${connectionId}): ${state.gateway.sessionId}`);
       } else {
+        noteGatewayIdentifyAttempt(gatewayRuntime, Date.now());
         socket.send(JSON.stringify({
           op: 2,
           d: {
@@ -228,7 +339,10 @@ async function handleWsPayload(payload, socket, connectionId) {
             shard: [0, 1],
           },
         }));
-        console.log(`📡 Sent identify (#${connectionId}) with intents=${IDENTIFY_INTENTS}`);
+        const cooldownNote = gatewayRuntime.forceFreshIdentifyUntil > Date.now()
+          ? ` | fresh-identify until ${formatIsoTimestamp(new Date(gatewayRuntime.forceFreshIdentifyUntil).toISOString())}`
+          : '';
+        console.log(`📡 Sent identify (#${connectionId}) with intents=${IDENTIFY_INTENTS}${cooldownNote}`);
       }
       saveState();
       break;
@@ -238,15 +352,28 @@ async function handleWsPayload(payload, socket, connectionId) {
       break;
     case 7:
       console.log('⚠️ QQ gateway requested reconnect');
-      requestGatewayReconnect('gateway requested reconnect', 500);
+      noteGatewayReconnectRequested(gatewayRuntime, Date.now());
+      requestGatewayReconnect('gateway requested reconnect', resolveGatewayReconnectDelay({
+        code: 7,
+        reconnectIndex,
+        reconnectRequestedStreak: gatewayRuntime.reconnectRequestedStreak,
+        defaultDelays: RECONNECT_DELAYS,
+      }));
       break;
     case 9:
       console.log('⚠️ QQ gateway invalid session; clearing saved gateway session');
       clearGatewaySessionState('invalid session');
+      forceGatewayFreshIdentify(gatewayRuntime, Date.now());
       saveState();
-      requestGatewayReconnect('invalid session', 500);
+      requestGatewayReconnect('invalid session', resolveGatewayReconnectDelay({
+        code: 4009,
+        reconnectIndex,
+        sessionTimeoutStreak: Math.max(2, gatewayRuntime.sessionTimeoutStreak),
+        defaultDelays: RECONNECT_DELAYS,
+      }));
       break;
     case 11:
+      noteGatewayHeartbeatAck(gatewayRuntime, Date.now());
       break;
     default:
       break;
@@ -258,6 +385,10 @@ async function handleDispatch(type, data) {
     state.gateway.sessionId = data?.session_id || null;
     state.gateway.lastConnectedAt = Date.now();
     state.gateway.lastError = null;
+    noteGatewayReady(gatewayRuntime, Date.now());
+    if (shouldResetReconnectBackoff(type)) {
+      reconnectIndex = 0;
+    }
     saveState();
     console.log(`✅ QQ READY session=${state.gateway.sessionId}`);
     return;
@@ -266,6 +397,10 @@ async function handleDispatch(type, data) {
   if (type === 'RESUMED') {
     state.gateway.lastConnectedAt = Date.now();
     state.gateway.lastError = null;
+    noteGatewayReady(gatewayRuntime, Date.now());
+    if (shouldResetReconnectBackoff(type)) {
+      reconnectIndex = 0;
+    }
     saveState();
     console.log('✅ QQ session resumed');
     return;
@@ -320,6 +455,13 @@ async function handleDispatch(type, data) {
   const content = normalizeIncomingContent(event.rawContent);
   if (!content && event.attachments.length === 0) return;
 
+  const textShortcutCommand = consumeTextShortcutCommand(event, content);
+  if (textShortcutCommand) {
+    recordAudit('text-shortcut', event, `${content} => ${textShortcutCommand}`);
+    await handleImmediateCommand(event, textShortcutCommand);
+    return;
+  }
+
   if (isImmediateCommand(content)) {
     await handleImmediateCommand(event, content);
     return;
@@ -356,8 +498,14 @@ async function handleImmediateCommand(event, content) {
   const [command, ...rest] = content.trim().split(/\s+/);
   const cmd = normalizeCommandAlias(command.toLowerCase());
 
+  if (cmd === '/confirm-action') {
+    await handleConfirmActionCommand(event, session, runtime, rest);
+    return;
+  }
+
   if (cmd === '/help') {
-    await replyText(event, buildHelpMessage(), { quickActions: true, uiCategory: 'help', replaceUiCard: true });
+    const helpVariant = normalizeHelpVariant(rest[0] || '');
+    await replyText(event, buildHelpMessageForSession(event, session, runtime, helpVariant), { quickActions: true, uiCategory: 'help', replaceUiCard: true });
     return;
   }
 
@@ -383,7 +531,96 @@ async function handleImmediateCommand(event, content) {
   }
 
   if (cmd === '/sessions') {
-    await replyText(event, formatSessionHistoryMessage(session), { quickActions: true, uiCategory: 'sessions', replaceUiCard: true });
+    await replyText(event, formatSessionHistoryMessage(session), {
+      quickActions: true,
+      uiCategory: 'sessions',
+      replaceUiCard: true,
+      textShortcutMenu: buildSessionsShortcutMenu(session),
+    });
+    return;
+  }
+
+  if (cmd === '/rename') {
+    const raw = rest.join(' ').trim();
+    if (!raw) {
+      await replyText(event, '用法：/rename <新标题> 或 /rename <session_id> <新标题>');
+      return;
+    }
+    const parsed = parseSessionTargetWithOptionalText(session, raw, { fallbackToCurrent: true });
+    const nextTitle = parsed.text;
+    if (!nextTitle) {
+      await replyText(event, '用法：/rename <新标题> 或 /rename <session_id> <新标题>');
+      return;
+    }
+    if (!parsed.targetId) {
+      session.pendingSessionTitle = truncate(nextTitle, 36);
+      session.updatedAt = new Date().toISOString();
+      saveState();
+      await replyText(event, `✅ 已设置下一个新会话的标题：${session.pendingSessionTitle}`, { quickActions: true, uiCategory: 'session', replaceUiCard: true });
+      return;
+    }
+    renameSessionHistoryEntry(session, parsed.targetId, nextTitle);
+    session.updatedAt = new Date().toISOString();
+    saveState();
+    recordAudit('session-rename', event, `${parsed.targetId} => ${truncate(nextTitle, 60)}`);
+    await replyText(event, `✅ 已重命名会话：${parsed.targetId}\n标题：${truncate(nextTitle, 80)}`, { quickActions: true, uiCategory: 'session', replaceUiCard: true });
+    return;
+  }
+
+  if (cmd === '/pin') {
+    const raw = rest.join(' ').trim();
+    const normalized = raw.toLowerCase();
+    if (['clear', 'off', 'unset', 'none'].includes(normalized)) {
+      session.sessionHistory = clearPinnedSessionHistory(session.sessionHistory, SESSION_HISTORY_MAX);
+      session.updatedAt = new Date().toISOString();
+      saveState();
+      recordAudit('session-unpin-all', event, 'cleared');
+      await replyText(event, '✅ 已清除所有置顶会话。', { quickActions: true, uiCategory: 'sessions', replaceUiCard: true });
+      return;
+    }
+    const targetId = resolveSessionReference(session, raw) || getDefaultSessionTargetId(session);
+    if (!targetId) {
+      await replyText(event, '当前没有可置顶的会话。先发一条普通消息开始，或用 `/resume <id>` 绑定旧会话。');
+      return;
+    }
+    rememberSessionIfCurrent(session, targetId, 'pin');
+    pinSessionHistoryEntry(session, targetId, true);
+    session.updatedAt = new Date().toISOString();
+    saveState();
+    recordAudit('session-pin', event, targetId);
+    await replyText(event, `📌 已置顶会话：${targetId}`, { quickActions: true, uiCategory: 'sessions', replaceUiCard: true });
+    return;
+  }
+
+  if (cmd === '/fork') {
+    const raw = rest.join(' ').trim();
+    const parsed = parseForkCommandInput(session, raw);
+    if (!parsed.sourceSessionId) {
+      await replyText(event, '用法：/fork [source_session_id] [新标题]\n当前没有可分支的来源会话。');
+      return;
+    }
+    const cancelled = cancelPeerRun(event.peerKey, 'fork new branch');
+    const sourceItem = getSessionHistoryEntry(session, parsed.sourceSessionId);
+    const branchTitle = parsed.title || buildForkSessionTitle(sourceItem, parsed.sourceSessionId);
+    const summary = buildForkSummary(session, sourceItem, parsed.sourceSessionId);
+    rememberSessionIfCurrent(session, session.codexThreadId, 'fork-source');
+    storePendingSummary(session, summary, parsed.sourceSessionId);
+    session.pendingForkSourceSessionId = parsed.sourceSessionId;
+    session.pendingSessionTitle = branchTitle;
+    session.codexThreadId = null;
+    session.lastInputTokens = null;
+    session.updatedAt = new Date().toISOString();
+    saveState();
+    recordAudit('session-fork', event, `${parsed.sourceSessionId} => ${truncate(branchTitle, 60)}`);
+    const lines = [
+      '🌿 已准备新的分支会话。',
+      `来源会话：${parsed.sourceSessionId}`,
+      `新标题：${branchTitle}`,
+      '下一条普通消息会基于该来源摘要开启一个全新的 Codex 会话。',
+    ];
+    if (cancelled.active) lines.push('当前运行中的任务已尝试取消。');
+    if (cancelled.clearedQueued > 0) lines.push(`已清空 ${cancelled.clearedQueued} 个排队任务。`);
+    await replyText(event, lines.join('\n'), { quickActions: true, uiCategory: 'session', replaceUiCard: true });
     return;
   }
 
@@ -409,13 +646,136 @@ async function handleImmediateCommand(event, content) {
     return;
   }
 
+  if (cmd === '/workspace') {
+    const handled = await handleWorkspaceCommand(event, session, rest);
+    if (handled) return;
+  }
+
+  if (cmd === '/changed') {
+    const workspaceDir = getWorkspaceDirForSession(event, session);
+    const changed = listChangedFiles(workspaceDir);
+    recordAudit('repo-changed', event, changed.ok ? `changed=${changed.status.entries.length}` : (changed.error || 'failed'));
+    await replyText(event, formatChangedFilesMessage(workspaceDir, changed), { quickActions: true, uiCategory: 'repo', replaceUiCard: true });
+    return;
+  }
+
+  if (cmd === '/patch') {
+    const workspaceDir = getWorkspaceDirForSession(event, session);
+    const target = rest.join(' ').trim();
+    const patch = getPatchArtifact(workspaceDir, target);
+    recordAudit('repo-patch', event, target || '(all)');
+    await replyText(event, formatPatchMessage(workspaceDir, patch, target), { quickActions: true, uiCategory: 'repo', replaceUiCard: true });
+    return;
+  }
+
+  if (cmd === '/open') {
+    const target = rest.join(' ').trim();
+    if (!target) {
+      await replyText(event, '用法：/open <相对路径|文件名>');
+      return;
+    }
+    const workspaceDir = getWorkspaceDirForSession(event, session);
+    const opened = openWorkspaceFile(workspaceDir, target);
+    recordAudit('workspace-open', event, target);
+    await replyText(event, formatOpenFileMessage(workspaceDir, opened), { quickActions: true, uiCategory: 'repo', replaceUiCard: true });
+    return;
+  }
+
+  if (cmd === '/repo') {
+    const subcommand = String(rest[0] || 'status').trim().toLowerCase();
+    const workspaceDir = getWorkspaceDirForSession(event, session);
+    if (subcommand === 'path') {
+      await replyText(event, `📁 当前 workspace\n${workspaceDir}`, { quickActions: true, uiCategory: 'repo', replaceUiCard: true });
+      return;
+    }
+    if (subcommand === 'log') {
+      const repoLog = getRepoLog(workspaceDir, 6);
+      await replyText(event, formatRepoLogMessage(workspaceDir, repoLog), { quickActions: true, uiCategory: 'repo', replaceUiCard: true });
+      return;
+    }
+    if (subcommand !== 'status' && rest.length > 0) {
+      await replyText(event, '用法：/repo [status|log|path]');
+      return;
+    }
+    const repoStatus = getRepoStatus(workspaceDir);
+    recordAudit('repo-status', event, repoStatus.ok ? `${repoStatus.branch} clean=${repoStatus.clean}` : repoStatus.error || 'repo status failed');
+    await replyText(event, formatRepoStatusMessage(workspaceDir, repoStatus), { quickActions: true, uiCategory: 'repo', replaceUiCard: true });
+    return;
+  }
+
+  if (cmd === '/branch') {
+    const workspaceDir = getWorkspaceDirForSession(event, session);
+    const raw = rest.join(' ').trim();
+    if (!raw) {
+      const repoStatus = getRepoStatus(workspaceDir);
+      await replyText(event, formatBranchListMessage(repoStatus), { quickActions: true, uiCategory: 'repo', replaceUiCard: true });
+      return;
+    }
+    const switched = switchBranch(workspaceDir, raw);
+    if (!switched.ok) {
+      await replyText(event, `❌ 切换分支失败\n${switched.error || '(unknown)'}`, { quickActions: true, uiCategory: 'repo', replaceUiCard: true });
+      return;
+    }
+    session.updatedAt = new Date().toISOString();
+    saveState();
+    recordAudit('repo-branch', event, `${raw} => ${switched.branch}`);
+    await replyText(event, [
+      switched.created ? '🌱 已创建并切换到新分支。' : '🌿 已切换分支。',
+      `当前分支：${switched.branch}`,
+      ...(switched.sanitized ? [`原输入已规范化：${raw}`] : []),
+      `工作区：${workspaceDir}`,
+    ].join('\n'), { quickActions: true, uiCategory: 'repo', replaceUiCard: true });
+    return;
+  }
+
+  if (cmd === '/diff') {
+    const mode = normalizeDiffMode(rest[0] || '');
+    if (!mode) {
+      await replyText(event, '用法：/diff [working|staged|all]');
+      return;
+    }
+    const workspaceDir = getWorkspaceDirForSession(event, session);
+    const report = getDiffReport(workspaceDir, mode);
+    recordAudit('repo-diff', event, `${mode}:${report.ok ? 'ok' : (report.error || 'failed')}`);
+    await replyText(event, formatDiffMessage(workspaceDir, report, mode), { quickActions: true, uiCategory: 'repo', replaceUiCard: true });
+    return;
+  }
+
+  if (cmd === '/export') {
+    const target = String(rest[0] || '').trim().toLowerCase();
+    if (target !== 'diff') {
+      await replyText(event, '用法：/export diff [working|staged|all]');
+      return;
+    }
+    const mode = normalizeDiffMode(rest[1] || '');
+    if (!mode) {
+      await replyText(event, '用法：/export diff [working|staged|all]');
+      return;
+    }
+    const workspaceDir = getWorkspaceDirForSession(event, session);
+    const exported = exportWorkspaceDiff(workspaceDir, mode);
+    recordAudit('repo-export', event, `${target}:${mode}`);
+    await replyText(event, formatExportMessage(workspaceDir, exported, mode), { quickActions: true, uiCategory: 'repo', replaceUiCard: true });
+    return;
+  }
+
   if (cmd === '/progress') {
     await replyText(event, formatProgressMessage(session, runtime), { quickActions: true, uiCategory: 'progress', replaceUiCard: true });
     return;
   }
 
+  if (cmd === '/queue') {
+    await replyText(event, formatQueueMessage(session, runtime), { quickActions: true, uiCategory: 'progress', replaceUiCard: true });
+    return;
+  }
+
   if (cmd === '/diag') {
     await replyText(event, formatDiagnosticsMessage(event), { quickActions: true, uiCategory: 'diag', replaceUiCard: true });
+    return;
+  }
+
+  if (cmd === '/version') {
+    await replyText(event, formatVersionMessage(), { quickActions: true, uiCategory: 'diag', replaceUiCard: true });
     return;
   }
 
@@ -459,6 +819,78 @@ async function handleImmediateCommand(event, content) {
     return;
   }
 
+  if (cmd === '/retry') {
+    if (!session.lastPromptInput) {
+      await replyText(event, '当前没有可重试的最近请求。先发一条普通消息，或等待一次任务执行完成。');
+      return;
+    }
+    await enqueuePrompt(event, session.lastPromptInput, {
+      reason: 'retry',
+      label: `重试：${session.lastPromptPreview || describePromptInput(session.lastPromptInput)}`,
+      sourceSessionId: session.codexThreadId || session.lastRun?.threadId || '',
+    });
+    recordAudit('run-retry', event, truncate(session.lastPromptPreview || describePromptInput(session.lastPromptInput), 120));
+    return;
+  }
+
+  if (cmd === '/commit') {
+    const message = rest.join(' ').trim();
+    if (!message) {
+      await replyText(event, '用法：/commit <提交说明>');
+      return;
+    }
+    const workspaceDir = getWorkspaceDirForSession(event, session);
+    const committed = commitWorkspace(workspaceDir, message);
+    if (!committed.ok) {
+      await replyText(event, committed.noChanges ? 'ℹ️ 当前没有可提交的改动。' : `❌ 提交失败\n${committed.error || '(unknown)'}`, { quickActions: true, uiCategory: 'repo', replaceUiCard: true });
+      return;
+    }
+    recordAudit('repo-commit', event, `${committed.hash} ${truncate(message, 80)}`);
+    await replyText(event, [
+      '✅ 已提交当前 workspace 改动。',
+      `commit：${committed.hash} ${message}`,
+      `分支：${committed.branch || '(unknown)'}`,
+      `文件：${committed.stagedFiles.slice(0, 6).join(', ')}${committed.stagedFiles.length > 6 ? ` 等 ${committed.stagedFiles.length} 个` : ''}`,
+    ].join('\n'), { quickActions: true, uiCategory: 'repo', replaceUiCard: true });
+    return;
+  }
+
+  if (cmd === '/rollback') {
+    const mode = normalizeRollbackMode(rest[0] || '');
+    if (!mode) {
+      await replyText(event, '用法：/rollback [tracked|all]\n`tracked` 仅回退已跟踪改动；`all` 还会清理未跟踪文件（保留 `.attachments/`）。');
+      return;
+    }
+    if (mode === 'all') {
+      await promptPendingActionConfirmation(event, runtime, {
+        prefix: 'rollback',
+        kind: 'rollback',
+        title: '确认回退所有工作区改动',
+        lines: [
+          '这会回退已跟踪改动，并清理未跟踪文件（保留 `.attachments/`）。',
+          `工作区：${getWorkspaceDirForSession(event, session)}`,
+        ],
+        data: { mode },
+        uiCategory: 'repo',
+        confirmOptions: [
+          { label: '确认回退', value: 'confirm' },
+          { label: '仅看状态', value: 'status' },
+          { label: '取消', value: 'cancel' },
+        ],
+      });
+      return;
+    }
+    const workspaceDir = getWorkspaceDirForSession(event, session);
+    const rolledBack = rollbackWorkspace(workspaceDir, mode);
+    if (!rolledBack.ok) {
+      await replyText(event, `❌ 回退失败\n${rolledBack.error || '(unknown)'}`, { quickActions: true, uiCategory: 'repo', replaceUiCard: true });
+      return;
+    }
+    recordAudit('repo-rollback', event, mode);
+    await replyText(event, formatRollbackMessage(workspaceDir, rolledBack, mode), { quickActions: true, uiCategory: 'repo', replaceUiCard: true });
+    return;
+  }
+
   if (cmd === '/resume') {
     const raw = rest.join(' ').trim();
     if (!raw) {
@@ -473,13 +905,20 @@ async function handleImmediateCommand(event, content) {
       session.codexThreadId = null;
       session.lastInputTokens = null;
       clearPendingSummary(session);
+      clearPendingSessionDraft(session);
       session.updatedAt = new Date().toISOString();
       saveState();
       await replyText(event, '✅ 已清除当前绑定的 Codex session。下条消息会新建会话。');
       return;
     }
-    session.codexThreadId = raw;
+    const targetSessionId = resolveSessionReference(session, raw) || raw;
+    if (session.codexThreadId) {
+      rememberSessionId(session, session.codexThreadId, session.lastInputTokens, 'manual-resume-switch');
+    }
+    session.codexThreadId = targetSessionId;
     session.lastInputTokens = null;
+    clearPendingSessionDraft(session);
+    rememberSessionId(session, targetSessionId, null, 'manual-resume');
     session.updatedAt = new Date().toISOString();
     saveState();
     await replyText(event, `✅ 已绑定 Codex session：${session.codexThreadId}`);
@@ -490,6 +929,24 @@ async function handleImmediateCommand(event, content) {
     const nextMode = String(rest[0] || '').trim().toLowerCase();
     if (nextMode !== 'safe' && nextMode !== 'dangerous') {
       await replyText(event, '用法：/mode safe 或 /mode dangerous');
+      return;
+    }
+    if (nextMode === 'dangerous' && session.mode !== 'dangerous') {
+      await promptPendingActionConfirmation(event, runtime, {
+        prefix: 'mode',
+        kind: 'mode-switch',
+        title: '确认切换到 dangerous 模式',
+        lines: [
+          'dangerous 模式下，Codex 可直接执行更激进的本地操作。',
+          '仅建议在你完全信任当前 QQ bot 和 workspace 时开启。',
+        ],
+        data: { nextMode },
+        uiCategory: 'status',
+        confirmOptions: [
+          { label: '切到 dangerous', value: 'confirm' },
+          { label: '保持 safe', value: 'cancel' },
+        ],
+      });
       return;
     }
     session.mode = nextMode;
@@ -538,12 +995,162 @@ async function handleImmediateCommand(event, content) {
     return;
   }
 
-  await replyText(event, '未知命令，发 `/help` 查看可用命令。');
+  await replyText(event, buildUnknownCommandMessageForSession(session, runtime));
 }
 
-async function enqueuePrompt(event, promptInput) {
+async function handleWorkspaceCommand(event, session, rest) {
+  const raw = rest.join(' ').trim();
+  const subcommand = String(rest[0] || '').trim().toLowerCase();
+
+  if (!raw || ['path', 'show', 'status', 'current'].includes(subcommand)) {
+    await replyText(event, formatWorkspaceMessage(event, session), { quickActions: true, uiCategory: 'repo', replaceUiCard: true });
+    return true;
+  }
+
+  if (['reset', 'default', 'clear'].includes(subcommand)) {
+    session.workspaceDir = getDefaultWorkspaceDir(event.peerKey);
+    rememberWorkspaceHistory(session, session.workspaceDir);
+    session.updatedAt = new Date().toISOString();
+    saveState();
+    recordAudit('workspace-reset', event, session.workspaceDir);
+    await replyText(event, formatWorkspaceMessage(event, session, {
+      notice: '✅ 已恢复默认 workspace。',
+    }), { quickActions: true, uiCategory: 'repo', replaceUiCard: true });
+    return true;
+  }
+
+  if (['recent', 'list'].includes(subcommand)) {
+    await replyText(event, formatWorkspaceHistoryMessage(event, session), {
+      quickActions: true,
+      uiCategory: 'repo',
+      replaceUiCard: true,
+      textShortcutMenu: buildWorkspaceShortcutMenu(event, session),
+    });
+    return true;
+  }
+
+  const targetInput = ['set', 'use', 'cd'].includes(subcommand)
+    ? rest.slice(1).join(' ').trim()
+    : raw;
+  if (!targetInput) {
+    await replyText(event, '用法：/workspace [show|recent|set <path|编号>|reset]\n相对路径会放到 WORKSPACE_ROOT 下；绝对路径可直接指向现有项目。');
+    return true;
+  }
+
+  const resolvedTarget = resolveWorkspaceReference(event, session, targetInput) || targetInput;
+  const resolved = resolveWorkspaceOverrideInput(resolvedTarget);
+  if (!resolved.ok) {
+    await replyText(event, `❌ workspace 设置失败\n${resolved.error}`);
+    return true;
+  }
+
+  session.workspaceDir = resolved.workspaceDir;
+  rememberWorkspaceHistory(session, resolved.workspaceDir);
+  session.updatedAt = new Date().toISOString();
+  saveState();
+  recordAudit('workspace-set', event, session.workspaceDir, {
+    created: resolved.created,
+    relativeToRoot: resolved.relativeToRoot,
+  });
+  await replyText(event, formatWorkspaceMessage(event, session, {
+    notice: resolved.created ? '✅ 已切换到新的 workspace，并已自动创建目录。' : '✅ 已切换 workspace。',
+  }), { quickActions: true, uiCategory: 'repo', replaceUiCard: true });
+  return true;
+}
+
+async function handleConfirmActionCommand(event, session, runtime, rest) {
+  const rawToken = String(rest[0] || '').trim();
+  const rawDecision = String(rest[1] || '').trim().toLowerCase();
+  const tokenKeyword = rawToken.toLowerCase();
+
+  if (!rawToken) {
+    await replyText(event, '用法：`/confirm-action list`，或 `/confirm-action <token|latest> <confirm|cancel>`。');
+    return;
+  }
+
+  if (['list', 'ls'].includes(tokenKeyword)) {
+    await replyText(event, formatPendingActionsMessage(runtime), { quickActions: true, uiCategory: 'status', replaceUiCard: true });
+    return;
+  }
+
+  const latestPending = tokenKeyword === 'latest' ? getLatestPendingAction(runtime.pendingActions) : null;
+  const token = latestPending?.token || rawToken;
+  const decision = rawDecision;
+
+  if (!decision) {
+    const pending = peekPendingAction(runtime.pendingActions, token);
+    if (!pending) {
+      await replyText(event, '这条确认已经过期或不存在，可发 `/confirm-action list` 查看当前待确认操作。');
+      return;
+    }
+    await replyText(event, formatPendingActionDetailMessage(token, pending), { quickActions: true, uiCategory: 'status', replaceUiCard: true });
+    return;
+  }
+
+  const pending = peekPendingAction(runtime.pendingActions, token);
+  if (!pending) {
+    await replyText(event, '这条确认已经过期，请重新发送原命令。');
+    return;
+  }
+
+  if (decision === 'cancel') {
+    consumePendingAction(runtime.pendingActions, token);
+    await replyText(event, `✅ 已取消：${pending.title || pending.kind}`);
+    return;
+  }
+
+  if (pending.kind === 'rollback') {
+    const workspaceDir = getWorkspaceDirForSession(event, session);
+    if (decision === 'status') {
+      const repoStatus = getRepoStatus(workspaceDir);
+      await replyText(event, formatRepoStatusMessage(workspaceDir, repoStatus), { quickActions: true, uiCategory: 'repo', replaceUiCard: true });
+      return;
+    }
+    if (decision === 'confirm') {
+      const mode = normalizeRollbackMode(pending.data?.mode || '');
+      if (!mode) {
+        await replyText(event, '确认数据缺失，请重新发送 `/rollback all`。');
+        return;
+      }
+      consumePendingAction(runtime.pendingActions, token);
+      const rolledBack = rollbackWorkspace(workspaceDir, mode);
+      if (!rolledBack.ok) {
+        await replyText(event, `❌ 回退失败\n${rolledBack.error || '(unknown)'}`, { quickActions: true, uiCategory: 'repo', replaceUiCard: true });
+        return;
+      }
+      recordAudit('repo-rollback', event, `${mode}:confirmed`);
+      await replyText(event, formatRollbackMessage(workspaceDir, rolledBack, mode), { quickActions: true, uiCategory: 'repo', replaceUiCard: true });
+      return;
+    }
+  }
+
+  if (pending.kind === 'mode-switch') {
+    if (decision === 'confirm') {
+      const nextMode = String(pending.data?.nextMode || '').trim();
+      if (nextMode !== 'dangerous' && nextMode !== 'safe') {
+        await replyText(event, '确认数据缺失，请重新发送 `/mode dangerous`。');
+        return;
+      }
+      consumePendingAction(runtime.pendingActions, token);
+      session.mode = nextMode;
+      session.updatedAt = new Date().toISOString();
+      saveState();
+      recordAudit('mode-switch', event, `${nextMode}:confirmed`);
+      await replyText(event, `✅ 当前会话模式已切换为 ${nextMode}`);
+      return;
+    }
+  }
+
+  await replyText(event, [
+    '这条确认选项无法识别。',
+    formatPendingActionDetailMessage(token, pending),
+  ].join('\n\n'));
+}
+
+async function enqueuePrompt(event, promptInput, options = {}) {
   const runtime = getPeerRuntime(event.peerKey);
   const session = getPeerSession(event.peerKey, event.kind);
+  clearPeerTextShortcutMenu(event.peerKey);
   if (MAX_QUEUE_PER_PEER > 0 && runtime.queue.length >= MAX_QUEUE_PER_PEER) {
     await replyText(event, `⛔ 当前会话排队已满（上限 ${MAX_QUEUE_PER_PEER}）。请稍后重试，或先发 /cancel 清队列。`);
     return;
@@ -553,7 +1160,12 @@ async function enqueuePrompt(event, promptInput) {
   runtime.queue.push({
     event,
     promptInput,
+    promptPreview: truncate(describePromptInput(promptInput), 120),
     enqueuedAt: Date.now(),
+    jobId: `job-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+    reason: String(options.reason || 'message').trim() || 'message',
+    label: String(options.label || '').trim(),
+    sourceSessionId: String(options.sourceSessionId || '').trim() || null,
   });
 
   if (queuedBefore > 0) {
@@ -585,7 +1197,7 @@ async function processPeerQueue(peerKey) {
 async function executeJob(job, session, runtime) {
   const activeRun = {
     peerKey: job.event.peerKey,
-    promptPreview: truncate(describePromptInput(job.promptInput), 120),
+    promptPreview: job.promptPreview || truncate(describePromptInput(job.promptInput), 120),
     startedAt: Date.now(),
     updatedAt: Date.now(),
     phase: 'starting',
@@ -601,12 +1213,16 @@ async function executeJob(job, session, runtime) {
     lastPhaseNoticeAt: 0,
     lastPhaseNoticePhase: '',
     sourceMessageId: job.event.messageId,
+    jobId: job.jobId,
+    jobReason: job.reason || 'message',
+    sourceSessionId: job.sourceSessionId || null,
   };
   runtime.activeRun = activeRun;
   let releaseGlobalSlot = () => {};
   let progressPingTimer = null;
 
   try {
+    storeLastPromptInput(session, job.promptInput, activeRun.promptPreview);
     await clearPeerUiCards(job.event, ['status', 'session', 'sessions', 'files', 'diag']);
     if (job.event.kind === 'c2c') {
       await safeSendInputNotify(job.event);
@@ -694,7 +1310,7 @@ async function executeJob(job, session, runtime) {
       }
     }
 
-    updateSessionFromResult(session, result, job.event.kind);
+    updateSessionFromResult(session, result, job.event.kind, activeRun);
     if (result.ok && preparedInput.usedPendingSummary) {
       clearPendingSummary(session);
     }
@@ -766,7 +1382,7 @@ async function runCodex({ session, prompt, imagePaths, activeRun, event = null, 
   const workspaceDir = resolveWorkspaceDir(session.workspaceDir || path.join(WORKSPACE_ROOT, sanitizePeerKey(activeRun.peerKey)));
   session.workspaceDir = workspaceDir;
   ensureDir(workspaceDir);
-  ensureGitRepo(workspaceDir);
+  ensureWorkspaceGitRepo(workspaceDir);
 
   const args = buildCodexArgs({ session, workspaceDir, prompt, imagePaths });
   return await spawnCodex(args, workspaceDir, {
@@ -964,8 +1580,11 @@ function spawnCodex(args, cwd, options = {}) {
 }
 
 async function replyText(event, text, options = {}) {
-  const chunks = splitForChat(text, MAX_TEXT_CHARS);
+  const shortcutMenu = buildReplyTextShortcutMenu(event, options);
+  const decoratedText = appendTextShortcutHintToReply(text, shortcutMenu);
+  const chunks = splitForChat(decoratedText, MAX_TEXT_CHARS);
   const sent = [];
+  const runtime = getPeerRuntime(event.peerKey);
   if (options.replaceUiCard && options.uiCategory) {
     await clearPeerUiCards(event, [options.uiCategory]);
   }
@@ -987,6 +1606,11 @@ async function replyText(event, text, options = {}) {
       break;
     }
   }
+  if (shortcutMenu && sent.length > 0) {
+    runtime.textShortcutMenu = shortcutMenu;
+  } else if (options.uiCategory) {
+    runtime.textShortcutMenu = null;
+  }
   if (options.uiCategory && sent[0]?.id) {
     rememberPeerUiCard(event.peerKey, options.uiCategory, sent[0].id);
   }
@@ -995,23 +1619,49 @@ async function replyText(event, text, options = {}) {
 
 async function sendTextMessage(event, content, replyToMessageId, options = {}) {
   const token = await getAccessToken();
-  const canUseQuickActions = ENABLE_QUICK_ACTIONS
-    && Boolean(options.quickActions)
-    && !String(content || '').includes('```')
-    && String(content || '').length <= 900;
-  if (canUseQuickActions) {
+  const session = getPeerSession(event.peerKey, event.kind);
+  const quickActionRequested = shouldAttemptQuickActions({
+    enabled: ENABLE_QUICK_ACTIONS,
+    requested: Boolean(options.quickActions),
+    content,
+    capability: session.quickActionsCapability,
+    retryMs: QUICK_ACTION_RETRY_MS,
+  });
+  if (quickActionRequested) {
     try {
       const interactive = await sendInteractiveMessage(token, event, String(content || ''), replyToMessageId, {
         preferProactive: Boolean(options.preferProactive),
         uiCategory: options.uiCategory || '',
       });
+      const nextCapability = markQuickActionsSupported(session.quickActionsCapability);
+      if (JSON.stringify(nextCapability) !== JSON.stringify(session.quickActionsCapability)) {
+        session.quickActionsCapability = nextCapability;
+        session.updatedAt = new Date().toISOString();
+        saveState();
+        recordAudit('quick-actions-supported', event, options.uiCategory || 'general');
+      }
       incrementTelemetry('outboundMessages');
       recordAudit('outbound', event, `interactive:${options.uiCategory || 'general'}`, {
         messageId: interactive?.id || '',
       });
       return interactive;
     } catch (err) {
-      console.error(`interactive send failed, fallback to text: ${safeError(err)}`);
+      if (isQuickActionUnsupportedError(err)) {
+        const nextCapability = markQuickActionsUnsupported(session.quickActionsCapability, err);
+        const previousStatus = session.quickActionsCapability?.status || 'unknown';
+        session.quickActionsCapability = nextCapability;
+        session.updatedAt = new Date().toISOString();
+        saveState();
+        if (previousStatus !== 'unsupported') {
+          console.warn(`quick actions disabled for ${event.peerKey}: ${nextCapability.disabledReason || safeError(err)}`);
+          recordAudit('quick-actions-disabled', event, truncate(nextCapability.disabledReason || safeError(err), 200), {
+            category: options.uiCategory || '',
+            code: nextCapability.failureCode || '',
+          });
+        }
+      } else {
+        console.error(`interactive send failed, fallback to text: ${safeError(err)}`);
+      }
     }
   }
   if (event.kind === 'group') {
@@ -1092,14 +1742,14 @@ async function getAccessToken() {
     return cachedToken.token;
   }
 
-  const response = await fetch(TOKEN_URL, {
+  const response = await fetchWithTimeout(TOKEN_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       appId: QQBOT_APP_ID,
       clientSecret: QQBOT_CLIENT_SECRET,
     }),
-  });
+  }, QQ_API_TIMEOUT_MS);
 
   const payload = await response.json();
   if (!response.ok || !payload?.access_token) {
@@ -1154,10 +1804,75 @@ async function sendGroupMessage(accessToken, groupOpenid, content, msgId) {
 function buildQuickActionKeyboard(event, category = 'general') {
   const session = getPeerSession(event.peerKey, event.kind);
   const runtime = getPeerRuntime(event.peerKey);
+  const canRetry = Boolean(session.lastPromptInput) && !runtime.activeRun;
+
+  if (category === 'session') {
+    return {
+      content: {
+        rows: [
+          { buttons: [
+            buildKeyboardButton('分支', '/fork', 1),
+            buildKeyboardButton('置顶', '/pin', 0),
+          ] },
+          { buttons: [
+            buildKeyboardButton('历史', '/sessions', 0),
+            buildKeyboardButton('状态', '/status', 0),
+          ] },
+          { buttons: [
+            buildKeyboardButton('队列', '/queue', 0),
+            buildKeyboardButton('新会', '/new', 1),
+          ] },
+        ],
+      },
+    };
+  }
+
+  if (category === 'sessions') {
+    return {
+      content: {
+        rows: [
+          { buttons: [
+            buildKeyboardButton('置顶', '/pin', 0),
+            buildKeyboardButton('分支', '/fork', 1),
+          ] },
+          { buttons: [
+            buildKeyboardButton('状态', '/status', 0),
+            buildKeyboardButton('队列', '/queue', 0),
+          ] },
+          { buttons: [
+            buildKeyboardButton('新会', '/new', 1),
+            buildKeyboardButton('文件', '/files', 0),
+          ] },
+        ],
+      },
+    };
+  }
+
+  if (category === 'repo') {
+    return {
+      content: {
+        rows: [
+          { buttons: [
+            buildKeyboardButton('仓库', '/repo', 0),
+            buildKeyboardButton('改动', '/changed', 1),
+          ] },
+          { buttons: [
+            buildKeyboardButton('分支', '/branch', 0),
+            buildKeyboardButton('差异', '/diff', 0),
+          ] },
+          { buttons: [
+            buildKeyboardButton('工作区', '/workspace', 0),
+            buildKeyboardButton('新会', '/new', 1),
+          ] },
+        ],
+      },
+    };
+  }
+
   const firstRow = runtime.activeRun
     ? [
       buildKeyboardButton('进展', '/progress', 1),
-      buildKeyboardButton('状态', '/status', 0),
+      buildKeyboardButton('队列', '/queue', 0),
     ]
     : [
       buildKeyboardButton('新会', '/new', 1),
@@ -1166,19 +1881,19 @@ function buildQuickActionKeyboard(event, category = 'general') {
   const secondRow = runtime.activeRun
     ? [
       buildKeyboardButton('停止', '/stop', 4, '将终止当前任务'),
-      buildKeyboardButton('新会', '/new', 1),
+      buildKeyboardButton('状态', '/status', 0),
     ]
     : [
-      buildKeyboardButton('历史', '/sessions', 0),
+      buildKeyboardButton(canRetry ? '重试' : '历史', canRetry ? '/retry' : '/sessions', canRetry ? 1 : 0),
       buildKeyboardButton('文件', '/files', 0),
     ];
   const thirdRow = runtime.activeRun
     ? [
-      buildKeyboardButton('文件', '/files', 0),
+      buildKeyboardButton('新会', '/new', 1),
       buildKeyboardButton('诊断', '/diag', 0),
     ]
     : [
-      buildKeyboardButton('诊断', '/diag', 0),
+      buildKeyboardButton('队列', '/queue', 0),
       buildKeyboardButton(session.mode === 'dangerous' ? 'Safe' : 'Danger', session.mode === 'dangerous' ? '/mode safe' : '/mode dangerous', session.mode === 'dangerous' ? 0 : 3),
     ];
   if (category === 'help') {
@@ -1258,14 +1973,14 @@ async function retractMessage(event, messageId) {
 }
 
 async function apiRequest(accessToken, method, requestPath, body, hasRetried = false) {
-  const response = await fetch(`${API_BASE}${requestPath}`, {
+  const response = await fetchWithTimeout(`${API_BASE}${requestPath}`, {
     method,
     headers: {
       Authorization: `QQBot ${accessToken}`,
       'Content-Type': 'application/json',
     },
     ...(body ? { body: JSON.stringify(body) } : {}),
-  });
+  }, QQ_API_TIMEOUT_MS);
 
   const raw = await response.text();
   let payload = {};
@@ -1286,14 +2001,25 @@ async function apiRequest(accessToken, method, requestPath, body, hasRetried = f
     return await apiRequest(nextToken, method, requestPath, body, true);
   }
 
-  throw new Error(`QQ API ${requestPath} failed (${response.status}): ${truncate(JSON.stringify(payload), 400)}`);
+  throw buildQqApiError(requestPath, response.status, payload);
+}
+
+function buildQqApiError(requestPath, status, payload) {
+  const error = new Error(`QQ API ${requestPath} failed (${status}): ${truncate(JSON.stringify(payload), 400)}`);
+  error.status = status;
+  error.requestPath = requestPath;
+  error.qqCode = Number.isFinite(payload?.code) ? payload.code : null;
+  error.qqErrCode = Number.isFinite(payload?.err_code) ? payload.err_code : null;
+  error.qqMessage = String(payload?.message || '').trim();
+  error.payload = payload;
+  return error;
 }
 
 function getPeerSession(peerKey, kind) {
   if (!state.peers[peerKey]) {
     state.peers[peerKey] = {
       kind,
-      workspaceDir: resolveWorkspaceDir(path.join(WORKSPACE_ROOT, sanitizePeerKey(peerKey))),
+      workspaceDir: getDefaultWorkspaceDir(peerKey),
       codexThreadId: null,
       lastInputTokens: null,
       mode: DEFAULT_MODE,
@@ -1303,11 +2029,18 @@ function getPeerSession(peerKey, kind) {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       lastRun: null,
+      lastPromptInput: null,
+      lastPromptPreview: null,
+      lastPromptAt: null,
       recentFiles: [],
+      workspaceHistory: [],
       sessionHistory: [],
       pendingSummary: null,
       pendingSummarySourceSessionId: null,
       pendingSummaryCreatedAt: null,
+      pendingSessionTitle: null,
+      pendingForkSourceSessionId: null,
+      quickActionsCapability: normalizeQuickActionCapability(null),
     };
     saveState();
   }
@@ -1325,9 +2058,79 @@ function getPeerRuntime(peerKey) {
       processing: false,
       activeRun: null,
       uiCards: {},
+      textShortcutMenu: null,
+      pendingActions: {},
     });
   }
-  return peerRuntimes.get(peerKey);
+  const runtime = peerRuntimes.get(peerKey);
+  cleanupExpiredPendingActions(runtime.pendingActions, Date.now());
+  return runtime;
+}
+
+function clearPeerTextShortcutMenu(peerKey) {
+  const runtime = getPeerRuntime(peerKey);
+  runtime.textShortcutMenu = null;
+}
+
+function createPendingActionToken(prefix = 'act') {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function consumeTextShortcutCommand(event, content) {
+  const runtime = getPeerRuntime(event.peerKey);
+  if (isTextShortcutMenuExpired(runtime.textShortcutMenu)) {
+    runtime.textShortcutMenu = null;
+    return null;
+  }
+  const command = resolveTextShortcutCommand(content, runtime.textShortcutMenu);
+  if (!command) return null;
+  runtime.textShortcutMenu = null;
+  return command;
+}
+
+async function promptPendingActionConfirmation(event, runtime, options = {}) {
+  const token = createPendingActionToken(options.prefix || 'confirm');
+  createPendingAction(runtime.pendingActions, token, {
+    kind: options.kind || 'unknown',
+    title: options.title || '',
+    data: options.data || {},
+  }, Date.now(), PENDING_ACTION_TTL_MS);
+
+  const lines = [
+    `⚠️ ${options.title || '需要确认的操作'}`,
+    ...(options.lines || []),
+    '',
+    '请确认：',
+  ];
+  if (Array.isArray(options.confirmOptions)) {
+    options.confirmOptions.forEach((item, index) => {
+      lines.push(`${index + 1}. ${item.label}`);
+    });
+  } else {
+    lines.push('1. 确认');
+    lines.push('2. 取消');
+  }
+
+  const menuItems = Array.isArray(options.confirmOptions) && options.confirmOptions.length > 0
+    ? options.confirmOptions.map((item) => ({
+      label: item.label,
+      command: `/confirm-action ${token} ${item.value}`,
+    }))
+    : [
+      { label: '确认', command: `/confirm-action ${token} confirm` },
+      { label: '取消', command: `/confirm-action ${token} cancel` },
+    ];
+
+  await replyText(event, lines.join('\n'), {
+    quickActions: true,
+    uiCategory: options.uiCategory || 'status',
+    replaceUiCard: true,
+    textShortcutMenu: createTextShortcutMenu({
+      category: 'confirm',
+      items: menuItems,
+      ttlMs: PENDING_ACTION_TTL_MS,
+    }),
+  });
 }
 
 function cancelPeerRun(peerKey, reason) {
@@ -1367,10 +2170,27 @@ function stopChildProcess(child) {
   }, 1500);
 }
 
-function updateSessionFromResult(session, result, kind) {
+function updateSessionFromResult(session, result, kind, activeRun = null) {
+  const previousThreadId = String(session.codexThreadId || '').trim();
+  const promptPreview = activeRun?.promptPreview || session.lastPromptPreview || '';
+  const answerPreview = buildResultPreview(result);
   if (result.threadId) {
     session.codexThreadId = result.threadId;
-    rememberSessionId(session, result.threadId, result.usage?.input_tokens, 'run');
+    const isNewThread = !previousThreadId || previousThreadId !== String(result.threadId || '').trim();
+    rememberSessionId(session, result.threadId, result.usage?.input_tokens, isNewThread ? (session.pendingForkSourceSessionId ? 'fork' : 'run') : 'run', {
+      title: isNewThread
+        ? (session.pendingSessionTitle || createAutoSessionTitle(promptPreview, result.threadId))
+        : undefined,
+      manualTitle: isNewThread ? Boolean(session.pendingSessionTitle) : undefined,
+      parentSessionId: isNewThread ? session.pendingForkSourceSessionId : undefined,
+      lastPromptPreview: promptPreview,
+      lastAnswerPreview: answerPreview,
+      lastRunOk: result.ok,
+      runCountDelta: 1,
+    });
+    if (isNewThread) {
+      clearPendingSessionDraft(session);
+    }
   } else if (!result.ok && kind === 'group') {
     session.codexThreadId = session.codexThreadId || null;
   }
@@ -1390,10 +2210,20 @@ function buildLastRunSnapshot(activeRun, result) {
     finishedAt: new Date().toISOString(),
     durationMs: Date.now() - activeRun.startedAt,
     eventCount: activeRun.eventCount,
+    threadId: result.threadId || null,
+    promptPreview: activeRun.promptPreview,
     latestActivity: activeRun.latestActivity,
     recentActivities: [...activeRun.recentActivities],
+    answerPreview: buildResultPreview(result),
     logs: [...activeRun.logs].slice(-6),
   };
+}
+
+function buildResultPreview(result) {
+  const answer = String(result?.finalAnswer || result?.messages?.join('\n\n') || '').replace(/\s+/g, ' ').trim();
+  if (answer) return truncate(answer, 160);
+  if (result?.error) return truncate(`失败：${String(result.error)}`, 160);
+  return '';
 }
 
 function shouldAutoResetSession(session) {
@@ -1466,7 +2296,173 @@ function shouldRetryFreshSession(result) {
 function resetPeerSession(session) {
   session.codexThreadId = null;
   session.lastInputTokens = null;
+  session.pendingSessionTitle = null;
+  session.pendingForkSourceSessionId = null;
   session.updatedAt = new Date().toISOString();
+}
+
+function sanitizeStoredPromptInput(promptInput) {
+  if (!promptInput || typeof promptInput !== 'object') return null;
+  const text = String(promptInput.text || '');
+  const attachments = Array.isArray(promptInput.attachments)
+    ? promptInput.attachments
+      .map((item) => ({
+        content_type: String(item?.content_type || 'unknown'),
+        filename: String(item?.filename || 'unnamed-file'),
+        url: normalizeAttachmentUrl(item?.url),
+        voice_wav_url: normalizeAttachmentUrl(item?.voice_wav_url),
+      }))
+      .filter((item) => item.url || item.voice_wav_url)
+    : [];
+  return { text, attachments };
+}
+
+function storeLastPromptInput(session, promptInput, preview = '') {
+  session.lastPromptInput = sanitizeStoredPromptInput(promptInput);
+  session.lastPromptPreview = preview || describePromptInput(promptInput);
+  session.lastPromptAt = new Date().toISOString();
+}
+
+function normalizeIsoValue(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  const ts = Date.parse(raw);
+  if (!Number.isFinite(ts)) return null;
+  return new Date(ts).toISOString();
+}
+
+function clearPendingSessionDraft(session) {
+  session.pendingSessionTitle = null;
+  session.pendingForkSourceSessionId = null;
+}
+
+function getSessionHistoryEntry(session, sessionId) {
+  return findSessionHistoryItem(session?.sessionHistory || [], sessionId);
+}
+
+function rememberSessionIfCurrent(session, sessionId, reason = 'run') {
+  const normalized = String(sessionId || '').trim();
+  if (!normalized) return;
+  if (normalized === String(session.codexThreadId || '').trim()) {
+    rememberSessionId(session, normalized, session.lastInputTokens, reason, {});
+  }
+}
+
+function renameSessionHistoryEntry(session, sessionId, title) {
+  const normalizedId = String(sessionId || '').trim();
+  if (!normalizedId) return;
+  if (normalizedId === String(session.codexThreadId || '').trim()) {
+    rememberSessionId(session, normalizedId, session.lastInputTokens, 'rename', {
+      title,
+      manualTitle: true,
+    });
+    return;
+  }
+  session.sessionHistory = renameSessionHistory(session.sessionHistory, normalizedId, title, SESSION_HISTORY_MAX);
+}
+
+function pinSessionHistoryEntry(session, sessionId, pinned = true) {
+  const normalizedId = String(sessionId || '').trim();
+  if (!normalizedId) return;
+  if (!getSessionHistoryEntry(session, normalizedId) && normalizedId === String(session.codexThreadId || '').trim()) {
+    rememberSessionId(session, normalizedId, session.lastInputTokens, 'pin', {});
+  }
+  session.sessionHistory = pinSessionHistory(session.sessionHistory, normalizedId, pinned, SESSION_HISTORY_MAX);
+}
+
+function getSortedSessionHistory(session) {
+  return normalizeSessionHistory(session?.sessionHistory || [], SESSION_HISTORY_MAX);
+}
+
+function getSessionHistoryChoices(session) {
+  const currentSessionId = String(session?.codexThreadId || '').trim();
+  return getSortedSessionHistory(session)
+    .filter((item) => item?.id && item.id !== currentSessionId);
+}
+
+function resolveSessionReference(session, raw) {
+  const trimmed = String(raw || '').trim();
+  if (!trimmed) return '';
+  const numeric = Number.parseInt(trimmed, 10);
+  if (String(numeric) === trimmed && numeric >= 1) {
+    return getSessionHistoryChoices(session)[numeric - 1]?.id || '';
+  }
+  return trimmed;
+}
+
+function getDefaultSessionTargetId(session) {
+  return String(session?.codexThreadId || '').trim() || getSortedSessionHistory(session)[0]?.id || '';
+}
+
+function parseSessionTargetWithOptionalText(session, raw, options = {}) {
+  const trimmed = String(raw || '').trim();
+  if (!trimmed) {
+    return { targetId: options.fallbackToCurrent ? getDefaultSessionTargetId(session) : '', text: '' };
+  }
+  const tokens = trimmed.split(/\s+/);
+  const knownIds = new Set([
+    String(session?.codexThreadId || '').trim(),
+    ...getSortedSessionHistory(session).map((item) => item.id),
+  ].filter(Boolean));
+  const firstTokenTarget = resolveSessionReference(session, tokens[0]);
+  if (tokens.length > 1 && knownIds.has(firstTokenTarget)) {
+    return {
+      targetId: firstTokenTarget,
+      text: trimmed.slice(tokens[0].length).trim(),
+    };
+  }
+  return {
+    targetId: options.fallbackToCurrent ? String(session?.codexThreadId || '').trim() : '',
+    text: trimmed,
+  };
+}
+
+function parseForkCommandInput(session, raw) {
+  const trimmed = String(raw || '').trim();
+  const defaultSource = getDefaultSessionTargetId(session);
+  if (!trimmed) {
+    return {
+      sourceSessionId: defaultSource,
+      title: '',
+    };
+  }
+  const tokens = trimmed.split(/\s+/);
+  const knownIds = new Set([
+    String(session?.codexThreadId || '').trim(),
+    ...getSortedSessionHistory(session).map((item) => item.id),
+  ].filter(Boolean));
+  const firstTokenTarget = resolveSessionReference(session, tokens[0]);
+  if (tokens.length > 1 && knownIds.has(firstTokenTarget)) {
+    return {
+      sourceSessionId: firstTokenTarget,
+      title: trimmed.slice(tokens[0].length).trim(),
+    };
+  }
+  return {
+    sourceSessionId: knownIds.has(firstTokenTarget) ? firstTokenTarget : defaultSource,
+    title: knownIds.has(firstTokenTarget) ? trimmed.slice(tokens[0].length).trim() : trimmed,
+  };
+}
+
+function buildForkSessionTitle(sourceItem, sourceSessionId) {
+  const base = String(sourceItem?.title || createAutoSessionTitle(sourceItem?.lastPromptPreview || '', sourceSessionId)).trim();
+  return truncate(`${base} · 分支`, 36);
+}
+
+function buildForkSummary(session, sourceItem, sourceSessionId) {
+  const lines = [
+    '这是一个从旧会话分叉出来的新会话，请把它当成独立分支继续。',
+    `来源会话：${sourceSessionId}`,
+  ];
+  if (sourceItem?.title) lines.push(`来源标题：${sourceItem.title}`);
+  if (sourceItem?.lastPromptPreview) lines.push(`最近请求：${sourceItem.lastPromptPreview}`);
+  if (sourceItem?.lastAnswerPreview) lines.push(`最近结果摘要：${sourceItem.lastAnswerPreview}`);
+  if (Number.isFinite(sourceItem?.lastInputTokens)) lines.push(`最近上下文 token：${sourceItem.lastInputTokens}`);
+  if (!sourceItem?.lastPromptPreview && session?.lastRun?.latestActivity) {
+    lines.push(`最近进展：${session.lastRun.latestActivity}`);
+  }
+  lines.push('接下来请在新会话里继续完成用户的下一条请求，并延续以上上下文，但不要假设旧会话之后的修改会自动同步过来。');
+  return lines.join('\n');
 }
 
 async function preparePromptInput({ event, session, promptInput, activeRun }) {
@@ -1554,11 +2550,16 @@ async function materializeAttachments({ attachments, workspaceDir, messageId, ac
 
     try {
       await downloadAttachmentToFile(sourceUrl, absolutePath, MAX_ATTACHMENT_BYTES);
+      const imageMeta = isImageAttachment(attachment)
+        ? detectImageMetadata(absolutePath)
+        : { width: null, height: null };
       output.push({
         ...attachment,
         sourceUrl,
         localPath: relativePath,
         isImage: isImageAttachment(attachment),
+        imageWidth: imageMeta.width,
+        imageHeight: imageMeta.height,
         downloadError: '',
       });
     } catch (err) {
@@ -1578,14 +2579,14 @@ async function materializeAttachments({ attachments, workspaceDir, messageId, ac
 }
 
 async function downloadAttachmentToFile(sourceUrl, absolutePath, maxBytes) {
-  let response = await fetch(sourceUrl);
+  let response = await fetchWithTimeout(sourceUrl, {}, QQ_DOWNLOAD_TIMEOUT_MS);
   if ((response.status === 401 || response.status === 403) && isQqAttachmentUrl(sourceUrl)) {
     const accessToken = await getAccessToken();
-    response = await fetch(sourceUrl, {
+    response = await fetchWithTimeout(sourceUrl, {
       headers: {
         Authorization: `QQBot ${accessToken}`,
       },
-    });
+    }, QQ_DOWNLOAD_TIMEOUT_MS);
   }
 
   if (!response.ok || !response.body) {
@@ -1621,6 +2622,31 @@ async function downloadAttachmentToFile(sourceUrl, absolutePath, maxBytes) {
   }
 }
 
+async function fetchWithTimeout(url, options = {}, timeoutMs = 0) {
+  if (!(timeoutMs > 0)) {
+    return await fetch(url, options);
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (controller.signal.aborted) {
+      const timeoutError = new Error(`request timeout after ${timeoutMs}ms`);
+      timeoutError.code = 'ETIMEDOUT';
+      timeoutError.cause = err;
+      throw timeoutError;
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function extractAttachmentTextPreviews({ attachments, workspaceDir, activeRun }) {
   const notes = [];
   const previews = [];
@@ -1629,7 +2655,7 @@ function extractAttachmentTextPreviews({ attachments, workspaceDir, activeRun })
 
   for (const attachment of attachments) {
     const next = { ...attachment, extractedText: '', extractedVia: '', extractError: '' };
-    if (!attachment.localPath || remainingBudget <= 0 || attachment.isImage) {
+    if (!attachment.localPath || remainingBudget <= 0) {
       output.push(next);
       continue;
     }
@@ -1639,7 +2665,8 @@ function extractAttachmentTextPreviews({ attachments, workspaceDir, activeRun })
     rememberActivity(activeRun, activeRun.latestActivity);
 
     const absolutePath = path.join(workspaceDir, attachment.localPath);
-    const limit = Math.min(MAX_EXTRACTED_TEXT_CHARS_PER_FILE, remainingBudget);
+    const perFileLimit = attachment.isImage ? MAX_IMAGE_OCR_CHARS_PER_FILE : MAX_EXTRACTED_TEXT_CHARS_PER_FILE;
+    const limit = Math.min(perFileLimit, remainingBudget);
     const extracted = extractTextPreviewFromFile(absolutePath, attachment, limit);
     if (extracted.text) {
       next.extractedText = extracted.text;
@@ -1667,6 +2694,10 @@ function extractTextPreviewFromFile(absolutePath, attachment, limit) {
 
   if (contentType.startsWith('audio/') || contentType.startsWith('video/')) {
     return { text: '', via: '', error: 'audio/video extraction unsupported', note: '暂不支持音视频自动转文字' };
+  }
+
+  if (isImageAttachment(attachment)) {
+    return extractImageTextPreviewFromFile(absolutePath, attachment, limit);
   }
 
   if (isDirectTextFile(ext, contentType, absolutePath)) {
@@ -1720,6 +2751,9 @@ function formatAttachmentsForPrompt(attachments) {
     }
     if (attachment.isImage && attachment.localPath) {
       parts.push('codex_image_input=true');
+      if (Number.isFinite(attachment.imageWidth) && Number.isFinite(attachment.imageHeight)) {
+        parts.push(`dimensions=${attachment.imageWidth}x${attachment.imageHeight}`);
+      }
     }
     lines.push(parts.join('; '));
     if (attachment.voice_wav_url) {
@@ -1763,50 +2797,93 @@ function normalizeAttachmentUrl(value) {
   return raw.startsWith('//') ? `https:${raw}` : raw;
 }
 
-function buildHelpMessage() {
-  return [
-    '可用命令',
-    '直接发送普通消息 = 交给 Codex 处理',
-    '群聊里需要 @ 机器人 才会触发',
-    '私聊可用 `/new` 主动开启新会话，旧会话可用 `/sessions` + `/resume <id>` 继续',
-    '图片会尽量作为图片输入直接交给 Codex，其他附件会下载到当前 workspace 后再引用',
-    '长上下文会在阈值处自动压缩续聊，长回复会自动按代码块安全分片',
-    '',
-    '/help',
-    '/whoami',
-    '/status',
-    '/state',
-    '/diag',
-    '/stats',
-    '/audit',
-    '/session',
-    '/sessions',
-    '/history',
-    '/new',
-    '/start',
-    '/files',
-    '/progress',
-    '/cancel',
-    '/stop',
-    '/reset',
-    '/resume <session_id|clear>',
-    '/profile default|code|docs|review|image',
-    '/mode safe|dangerous',
-    '/model <name|default>',
-    '/effort low|medium|high|default',
-  ].join('\n');
+function buildHelpMessageForSession(event, session, runtime, variant = 'default') {
+  return buildHelpMessage({
+    textOnly: shouldPreferTextOnlyHelp(session),
+    variant,
+    currentSessionId: String(session?.codexThreadId || '').trim(),
+    queueLength: Number(runtime?.queue?.length || 0) + (runtime?.activeRun ? 1 : 0),
+    hasRetry: Boolean(session?.lastPromptInput),
+    quickActionStatus: formatQuickActionCapability(session?.quickActionsCapability, QUICK_ACTION_RETRY_MS),
+  });
+}
+
+function buildUnknownCommandMessageForSession(session, runtime) {
+  return buildUnknownCommandMessage({
+    textOnly: shouldPreferTextOnlyHelp(session),
+    hasRetry: Boolean(session?.lastPromptInput || runtime?.activeRun),
+  });
+}
+
+function shouldPreferTextOnlyHelp(session) {
+  if (!ENABLE_QUICK_ACTIONS) return true;
+  return String(session?.quickActionsCapability?.status || '') === 'unsupported';
+}
+
+function buildReplyTextShortcutMenu(event, options = {}) {
+  if (options.textShortcutMenu) {
+    return options.textShortcutMenu;
+  }
+  if (!options.uiCategory || !options.quickActions) return null;
+  const session = getPeerSession(event.peerKey, event.kind);
+  if (!shouldPreferTextOnlyHelp(session)) return null;
+  const runtime = getPeerRuntime(event.peerKey);
+  return createTextShortcutMenu({
+    category: options.uiCategory,
+    hasRetry: Boolean(session.lastPromptInput) && !runtime.activeRun,
+    hasActiveRun: Boolean(runtime.activeRun),
+    ttlMs: TEXT_SHORTCUT_TTL_MS,
+  });
+}
+
+function buildSessionsShortcutMenu(session) {
+  const history = getSessionHistoryChoices(session).slice(0, 6);
+  if (history.length === 0) return null;
+  return createTextShortcutMenu({
+    category: 'sessions',
+    items: history.map((item) => ({
+      label: truncate(item.title || item.id, 10),
+      command: `/resume ${item.id}`,
+    })),
+    ttlMs: TEXT_SHORTCUT_TTL_MS,
+  });
+}
+
+function appendTextShortcutHintToReply(text, shortcutMenu) {
+  const hint = formatTextShortcutHint(shortcutMenu);
+  if (!hint) return text;
+  const body = String(text || '').trim();
+  return body ? `${body}\n\n${hint}` : hint;
 }
 
 function normalizeCommandAlias(command) {
   switch (String(command || '').trim().toLowerCase()) {
+    case '/doctor':
+      return '/diag';
+    case '/ws':
+      return '/workspace';
     case '/state':
     case '/health':
       return '/status';
     case '/debug':
       return '/diag';
+    case '/git':
+      return '/repo';
+    case '/changes':
+      return '/changed';
+    case '/cat':
+    case '/view':
+      return '/open';
+    case '/version':
+    case '/ver':
+    case '/about':
+      return '/version';
     case '/history':
     case '/hist':
       return '/sessions';
+    case '/rerun':
+    case '/redo':
+      return '/retry';
     case '/start':
     case '/fresh':
     case '/next':
@@ -1818,6 +2895,14 @@ function normalizeCommandAlias(command) {
     default:
       return String(command || '').trim().toLowerCase();
   }
+}
+
+function normalizeHelpVariant(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (['quick', 'short', 'mini', 'start', 'beginner'].includes(raw)) {
+    return 'quick';
+  }
+  return 'default';
 }
 
 function formatRunPhaseLabel(phase) {
@@ -1847,17 +2932,115 @@ function formatRunPhaseLabel(phase) {
   }
 }
 
+function formatJobReasonLabel(reason) {
+  switch (String(reason || '').trim()) {
+    case 'retry':
+      return '重试';
+    case 'fork':
+      return '分支续写';
+    case 'message':
+    default:
+      return '普通消息';
+  }
+}
+
 function buildShortcutHint(kind = 'default') {
   switch (String(kind || '').trim()) {
     case 'running':
-      return '快捷：`/progress` ` /status` ` /new` ` /stop`';
+      return '快捷：`/progress` `/queue` `/status` `/stop`';
     case 'queue':
-      return '快捷：`/progress` ` /status` ` /new` ` /cancel`';
+      return '快捷：`/queue` `/progress` `/status` `/cancel`';
     case 'idle':
-      return '快捷：`/status` ` /new` ` /sessions` ` /files`';
+      return '快捷：`/status` `/new` `/sessions` `/retry`';
+    case 'session':
+      return '快捷：`/rename` `/pin` `/fork` `/sessions`';
+    case 'repo':
+      return '快捷：`/repo` `/workspace` `/diff` `/branch`';
     default:
-      return '快捷：`/progress` ` /status` ` /new` ` /sessions`';
+      return '快捷：`/progress` `/queue` `/status` `/sessions`';
   }
+}
+
+function buildOperationalHints(event, session, runtime, options = {}) {
+  const hints = [];
+  const pendingActions = listPendingActions(runtime.pendingActions);
+
+  if (runtime.activeRun) {
+    hints.push('任务进行中：发 `/progress` 看里程碑，必要时用 `/stop`。');
+  }
+  if (runtime.queue.length > 0) {
+    hints.push(`队列里还有 ${runtime.queue.length} 条：发 \`/queue\` 查看，或用 \`/cancel\` 清空。`);
+  }
+  if (pendingActions.length > 0) {
+    hints.push(`有 ${pendingActions.length} 条待确认：发 \`/confirm-action list\` 找回确认菜单。`);
+  }
+  if (shouldPreferTextOnlyHelp(session)) {
+    hints.push('当前会话已走纯文本模式：发 `/help quick` 看更适合 QQ 手打的菜单。');
+  }
+  if (runtime.textShortcutMenu && shouldPreferTextOnlyHelp(session)) {
+    hints.push('当前数字菜单仍有效，可直接回 `1` `2` `3`。');
+  }
+  if (!runtime.activeRun && runtime.queue.length === 0 && !session.codexThreadId) {
+    hints.push('还没绑定当前会话：直接发消息即可开始，或先发 `/new`。');
+  }
+  if (options.includeGateway && !ws) {
+    hints.push('QQ 网关当前离线：服务会自动重连；如持续异常可发 `/diag` 再看。');
+  }
+
+  return hints.slice(0, options.maxHints || 4);
+}
+
+function getPendingActionChoices(pending) {
+  if (pending?.kind === 'rollback') {
+    return [
+      { label: '确认', value: 'confirm' },
+      { label: '看状态', value: 'status' },
+      { label: '取消', value: 'cancel' },
+    ];
+  }
+  return [
+    { label: '确认', value: 'confirm' },
+    { label: '取消', value: 'cancel' },
+  ];
+}
+
+function formatPendingActionSummary(token, pending) {
+  const expiresAt = pending?.expiresAt ? formatIsoTimestamp(pending.expiresAt) : '(no expiry)';
+  return `${token} | ${pending?.title || pending?.kind || 'unknown'} | 到期：${expiresAt}`;
+}
+
+function formatPendingActionDetailMessage(token, pending) {
+  const lines = [
+    '⚠️ 待确认操作',
+    formatPendingActionSummary(token, pending),
+  ];
+  for (const item of getPendingActionChoices(pending)) {
+    lines.push(`- ${item.label}：\`/confirm-action ${token} ${item.value}\``);
+  }
+  if (token !== 'latest') {
+    lines.push('- 也可直接处理最新一条：`/confirm-action latest confirm`');
+  }
+  return lines.join('\n');
+}
+
+function formatPendingActionsMessage(runtime) {
+  const pendingActions = listPendingActions(runtime.pendingActions);
+  if (pendingActions.length === 0) {
+    return '✅ 当前没有待确认操作。';
+  }
+
+  const lines = ['⚠️ 待确认操作'];
+  for (const item of pendingActions.slice(0, 4)) {
+    lines.push(`- ${formatPendingActionSummary(item.token, item)}`);
+    for (const action of getPendingActionChoices(item)) {
+      lines.push(`  ${action.label}：\`/confirm-action ${item.token} ${action.value}\``);
+    }
+  }
+  if (pendingActions.length > 4) {
+    lines.push(`- 其余 ${pendingActions.length - 4} 条请处理完上面几条后再发 \`/confirm-action list\` 查看。`);
+  }
+  lines.push('- 快速处理最新一条：`/confirm-action latest confirm`');
+  return lines.join('\n');
 }
 
 function normalizeProfileName(value) {
@@ -1903,6 +3086,9 @@ function buildReceiveAckMessage(session, promptInput) {
     session.codexThreadId ? '⏳ 已收到，正在继续当前会话…' : '⏳ 已收到，正在为你创建新会话…',
     `profile：${session.profile || 'default'}`,
   ];
+  if (!session.codexThreadId && session.pendingSessionTitle) {
+    lines.push(`新会话标题：${session.pendingSessionTitle}`);
+  }
   if (attachmentCount > 0) {
     lines.push(`附件：${attachmentCount} 个`);
   }
@@ -1918,6 +3104,9 @@ function buildQueueAckMessage(session, queuedBefore, promptInput) {
     `这条消息会${session.codexThreadId ? '继续当前会话' : '开启新会话'}。`,
     `profile：${session.profile || 'default'}`,
   ];
+  if (!session.codexThreadId && session.pendingSessionTitle) {
+    lines.push(`新会话标题：${session.pendingSessionTitle}`);
+  }
   if (attachmentCount > 0) {
     lines.push(`附件：${attachmentCount} 个`);
   }
@@ -1927,16 +3116,26 @@ function buildQueueAckMessage(session, queuedBefore, promptInput) {
 
 function formatStatusMessage(event, session, runtime) {
   const currentSession = session.codexThreadId || '(下一条消息新建)';
+  const currentHistory = session.codexThreadId ? getSessionHistoryEntry(session, session.codexThreadId) : null;
+  const pinnedCount = getSortedSessionHistory(session).filter((item) => item.pinnedAt).length;
+  const pendingActions = listPendingActions(runtime.pendingActions);
+  const quickActionStatus = formatQuickActionCapability(session.quickActionsCapability, QUICK_ACTION_RETRY_MS);
+  const workspaceDir = getWorkspaceDirForSession(event, session);
+  const repoStatus = getRepoStatus(workspaceDir);
   const lines = [
     '📊 当前状态',
     `会话：${currentSession}`,
-    `工作区：${session.workspaceDir}`,
+    `标题：${currentHistory?.title || session.pendingSessionTitle || '(未命名)'}`,
+    `工作区：${workspaceDir} | ${formatWorkspaceModeLabel(event.peerKey, workspaceDir)}`,
+    `Git：${formatRepoHeadline(repoStatus)}`,
     `profile：${session.profile || 'default'}`,
     `模式：${session.mode} | 模型：${session.model || DEFAULT_MODEL || '(default)'} | effort：${session.effort || DEFAULT_EFFORT || '(default)'}`,
     `排队：${runtime.queue.length} | 运行：${runtime.activeRun ? '处理中' : '空闲'} | 全局并发：${globalRunState.active}${MAX_GLOBAL_ACTIVE_RUNS > 0 ? `/${MAX_GLOBAL_ACTIVE_RUNS}` : ''}`,
     `上下文 token：${session.lastInputTokens ?? 0} | 压缩续聊：${COMPACT_CONTEXT_ON_THRESHOLD ? '开启' : '关闭'}${session.pendingSummary ? '（已准备压缩摘要）' : ''}`,
-    `附件：${DOWNLOAD_ATTACHMENTS ? `开启（最多 ${MAX_ATTACHMENTS_PER_MESSAGE} 个，图片输入 ${MAX_IMAGE_ATTACHMENTS} 个）` : '仅 URL'}`,
-    `最近文件：${Array.isArray(session.recentFiles) ? session.recentFiles.length : 0} | 历史会话：${Array.isArray(session.sessionHistory) ? session.sessionHistory.length : 0}`,
+    `快捷按钮：${quickActionStatus}`,
+    `附件：${DOWNLOAD_ATTACHMENTS ? `开启（最多 ${MAX_ATTACHMENTS_PER_MESSAGE} 个，图片输入 ${MAX_IMAGE_ATTACHMENTS} 个）` : '仅 URL'} | 图片 OCR：${IMAGE_OCR_MODE}`,
+    `最近文件：${Array.isArray(session.recentFiles) ? session.recentFiles.length : 0} | 历史会话：${Array.isArray(session.sessionHistory) ? session.sessionHistory.length : 0} | 置顶：${pinnedCount}`,
+    `待确认操作：${pendingActions.length}`,
     `QQ 网关：${state.gateway.sessionId ? '已连接' : '未连接'} | 最近事件：${formatTimestamp(state.gateway.lastEventAt)} | 最近错误：${state.gateway.lastError || '(none)'}`,
   ];
   if (runtime.activeRun) {
@@ -1949,6 +3148,14 @@ function formatStatusMessage(event, session, runtime) {
     lines.push(`上次进展：${session.lastRun.latestActivity || '(none)'}`);
   }
   lines.push('');
+  const hints = buildOperationalHints(event, session, runtime, { maxHints: 3 });
+  if (hints.length > 0) {
+    lines.push('建议：');
+    for (const hint of hints) {
+      lines.push(`- ${hint}`);
+    }
+    lines.push('');
+  }
   lines.push(buildShortcutHint(runtime.activeRun ? 'running' : 'idle'));
   return lines.join('\n');
 }
@@ -1961,6 +3168,7 @@ function formatProgressMessage(session, runtime) {
       `阶段：${formatRunPhaseLabel(run.phase)}`,
       `已运行：${formatDuration(Date.now() - run.startedAt)}`,
       `当前请求：${run.promptPreview}`,
+      `任务类型：${formatJobReasonLabel(run.jobReason)}`,
       `事件数：${run.eventCount} | 自动重试：${run.retryCount}`,
       `最近进展：${run.latestActivity || '(等待首个事件)'}`,
       `后续排队：${runtime.queue.length}`,
@@ -1983,6 +3191,7 @@ function formatProgressMessage(session, runtime) {
       `排队：${runtime.queue.length}`,
       `上次任务：${session.lastRun.ok ? '完成' : session.lastRun.cancelled ? '已取消' : '失败'}`,
       `耗时：${formatDuration(session.lastRun.durationMs || 0)}`,
+      `最近请求：${session.lastRun.promptPreview || session.lastPromptPreview || '(none)'}`,
       `最近进展：${session.lastRun.latestActivity || '(none)'}`,
     ];
     if (session.lastRun.logs?.length) {
@@ -2000,11 +3209,502 @@ function formatProgressMessage(session, runtime) {
   return 'ℹ️ 当前没有运行中的任务，也没有历史任务记录。\n直接发一条普通消息开始，或用 `/new` 明确开启新会话。';
 }
 
+function formatQueueMessage(session, runtime) {
+  const lines = ['🧵 队列状态'];
+  if (runtime.activeRun) {
+    lines.push(`- 运行中：${runtime.activeRun.promptPreview}`);
+    lines.push(`  类型：${formatJobReasonLabel(runtime.activeRun.jobReason)} | 已运行：${formatDuration(Date.now() - runtime.activeRun.startedAt)}`);
+    lines.push(`  阶段：${formatRunPhaseLabel(runtime.activeRun.phase)} | 最近进展：${runtime.activeRun.latestActivity || '(none)'}`);
+  } else {
+    lines.push('- 运行中：无');
+  }
+  if (runtime.queue.length === 0) {
+    lines.push('- 排队中：无');
+  } else {
+    lines.push(`- 排队中：${runtime.queue.length} 个`);
+    runtime.queue.slice(0, 6).forEach((job, index) => {
+      lines.push(`  ${index + 1}. ${job.label || job.promptPreview}`);
+      lines.push(`     等待：${formatDuration(Date.now() - job.enqueuedAt)} | 类型：${formatJobReasonLabel(job.reason)}`);
+    });
+  }
+  lines.push('');
+  lines.push(buildShortcutHint(runtime.activeRun || runtime.queue.length > 0 ? 'queue' : 'idle'));
+  return lines.join('\n');
+}
+
+function getWorkspaceDirForSession(event, session) {
+  const workspaceDir = resolveWorkspaceDir(session.workspaceDir || getDefaultWorkspaceDir(event.peerKey));
+  session.workspaceDir = workspaceDir;
+  ensureWorkspaceGitRepo(workspaceDir);
+  return workspaceDir;
+}
+
+function getDefaultWorkspaceDir(peerKey) {
+  return resolveWorkspaceDir(path.join(WORKSPACE_ROOT, sanitizePeerKey(peerKey)));
+}
+
+function getWorkspaceHistoryChoices(event, session) {
+  const current = getWorkspaceDirForSession(event, session);
+  const history = Array.isArray(session.workspaceHistory) ? session.workspaceHistory : [];
+  const deduped = [];
+  const seen = new Set();
+  for (const dir of [current, ...history.map((item) => item.dir)]) {
+    const normalized = resolveWorkspaceDir(dir);
+    if (!normalized || seen.has(normalized)) continue;
+    deduped.push(normalized);
+    seen.add(normalized);
+  }
+  return deduped.slice(0, WORKSPACE_HISTORY_MAX);
+}
+
+function resolveWorkspaceReference(event, session, raw) {
+  const trimmed = String(raw || '').trim();
+  const numeric = Number.parseInt(trimmed, 10);
+  if (String(numeric) === trimmed && numeric >= 1) {
+    return getWorkspaceHistoryChoices(event, session)[numeric - 1] || '';
+  }
+  return trimmed;
+}
+
+function formatWorkspaceModeLabel(peerKey, workspaceDir) {
+  return workspaceDir === getDefaultWorkspaceDir(peerKey) ? '默认 workspace' : '自定义 workspace';
+}
+
+function resolveWorkspaceOverrideInput(rawInput) {
+  const input = expandHomePath(String(rawInput || '').trim());
+  if (!input) {
+    return { ok: false, error: '请提供目标路径。' };
+  }
+
+  let targetPath = input;
+  let relativeToRoot = false;
+  if (!path.isAbsolute(input)) {
+    const normalizedRelative = input
+      .replace(/\\/g, '/')
+      .replace(/^\.\//, '')
+      .trim();
+    if (!normalizedRelative) {
+      return { ok: false, error: '相对路径不能为空。' };
+    }
+    if (normalizedRelative.split('/').includes('..')) {
+      return { ok: false, error: '相对路径不能包含 `..`；如需切到外部目录，请直接使用绝对路径。' };
+    }
+    targetPath = path.join(WORKSPACE_ROOT, normalizedRelative);
+    relativeToRoot = true;
+  }
+
+  const workspaceDir = resolveWorkspaceDir(targetPath);
+  if (fs.existsSync(workspaceDir) && !fs.statSync(workspaceDir).isDirectory()) {
+    return { ok: false, error: '目标路径不是文件夹。' };
+  }
+
+  const created = !fs.existsSync(workspaceDir);
+  ensureDir(workspaceDir);
+  ensureWorkspaceGitRepo(workspaceDir);
+  return {
+    ok: true,
+    workspaceDir,
+    created,
+    relativeToRoot,
+  };
+}
+
+function expandHomePath(input) {
+  if (input === '~') return os.homedir();
+  if (input.startsWith('~/')) return path.join(os.homedir(), input.slice(2));
+  return input;
+}
+
+function normalizeDiffMode(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw || raw === 'all') return 'all';
+  if (['working', 'worktree', 'unstaged'].includes(raw)) return 'working';
+  if (['staged', 'cached'].includes(raw)) return 'staged';
+  return '';
+}
+
+function normalizeRollbackMode(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw || raw === 'tracked') return 'tracked';
+  if (raw === 'all') return 'all';
+  return '';
+}
+
+function formatRepoHeadline(repoStatus) {
+  if (!repoStatus?.ok) return `不可用（${repoStatus?.error || 'unknown'}）`;
+  const pieces = [repoStatus.branch || '(unknown)'];
+  if (repoStatus.detached) pieces.push('detached');
+  if (repoStatus.unborn) pieces.push('unborn');
+  if (repoStatus.upstream) {
+    pieces.push(`↔ ${repoStatus.upstream}`);
+    if (repoStatus.ahead > 0 || repoStatus.behind > 0) {
+      pieces.push(`ahead ${repoStatus.ahead} / behind ${repoStatus.behind}`);
+    }
+  }
+  if (repoStatus.clean) {
+    pieces.push('clean');
+  } else {
+    pieces.push(`改动 ${repoStatus.entries.length}`);
+  }
+  return pieces.join(' | ');
+}
+
+function formatWorkspaceMessage(event, session, options = {}) {
+  const workspaceDir = getWorkspaceDirForSession(event, session);
+  const defaultWorkspaceDir = getDefaultWorkspaceDir(event.peerKey);
+  const repoStatus = getRepoStatus(workspaceDir);
+  const lines = ['📁 Workspace'];
+  if (options.notice) {
+    lines.push(options.notice);
+  }
+  lines.push(`当前：${workspaceDir}`);
+  lines.push(`默认：${defaultWorkspaceDir}`);
+  lines.push(`类型：${formatWorkspaceModeLabel(event.peerKey, workspaceDir)}`);
+  lines.push(`Git：${formatRepoHeadline(repoStatus)}`);
+  lines.push(`WORKSPACE_ROOT：${WORKSPACE_ROOT}`);
+  lines.push('');
+  lines.push('用法：');
+  lines.push('- `/workspace` 查看当前 workspace');
+  lines.push('- `/workspace recent` 查看最近 workspace');
+  lines.push('- `/workspace set demo` 切到 WORKSPACE_ROOT/demo');
+  lines.push('- `/workspace set 2` 切到最近列表里的第 2 个');
+  lines.push('- `/workspace set /absolute/path` 切到指定项目目录');
+  lines.push('- `/workspace reset` 恢复默认 workspace');
+  return lines.join('\n');
+}
+
+function formatWorkspaceHistoryMessage(event, session) {
+  const current = getWorkspaceDirForSession(event, session);
+  const choices = getWorkspaceHistoryChoices(event, session);
+  const lines = ['🗂️ 最近 workspace'];
+  for (const [index, dir] of choices.entries()) {
+    lines.push(`- ${index + 1}. ${dir}${dir === current ? '  ← 当前' : ''}`);
+  }
+  if (choices.length === 0) {
+    lines.push('- 暂无历史 workspace 记录');
+  }
+  lines.push('');
+  lines.push('可直接回数字切换，或用 `/workspace set <编号|路径>`。');
+  return lines.join('\n');
+}
+
+function buildWorkspaceShortcutMenu(event, session) {
+  const choices = getWorkspaceHistoryChoices(event, session).slice(0, 6);
+  if (choices.length === 0) return null;
+  return createTextShortcutMenu({
+    category: 'workspace',
+    items: choices.map((dir) => ({
+      label: truncate(path.basename(dir) || dir, 10),
+      command: `/workspace set ${dir}`,
+    })),
+    ttlMs: TEXT_SHORTCUT_TTL_MS,
+  });
+}
+
+function formatRepoStatusMessage(workspaceDir, repoStatus) {
+  if (!repoStatus?.ok) {
+    return [
+      '❌ Git 仓库状态获取失败',
+      repoStatus?.error || '(unknown)',
+      `工作区：${workspaceDir}`,
+    ].join('\n');
+  }
+
+  const lines = [
+    '🗃️ Workspace 仓库状态',
+    `路径：${workspaceDir}`,
+    `分支：${repoStatus.branch}${repoStatus.upstream ? ` ↔ ${repoStatus.upstream}` : ''}`,
+  ];
+  if (repoStatus.ahead > 0 || repoStatus.behind > 0) {
+    lines.push(`同步：ahead ${repoStatus.ahead} / behind ${repoStatus.behind}`);
+  }
+  lines.push(`HEAD：${repoStatus.headShort || '(no commits yet)'}`);
+  if (repoStatus.lastCommit) {
+    lines.push(`最近提交：${repoStatus.lastCommit.hash} ${repoStatus.lastCommit.subject} @ ${formatIsoTimestamp(repoStatus.lastCommit.committedAt)}`);
+  }
+  lines.push(`状态：${repoStatus.clean ? 'clean' : `staged ${repoStatus.counts.staged} | unstaged ${repoStatus.counts.unstaged} | untracked ${repoStatus.counts.untracked}`}`);
+  if (repoStatus.entries.length > 0) {
+    lines.push('');
+    lines.push('最近改动：');
+    repoStatus.entries.slice(0, 8).forEach((item) => {
+      lines.push(`- [${item.code}] ${item.file}`);
+    });
+  }
+  if (repoStatus.initialized || repoStatus.gitignoreUpdated) {
+    lines.push('');
+    lines.push(`仓库初始化：${repoStatus.initialized ? '本次已自动 init' : '已存在'} | gitignore：${repoStatus.gitignoreUpdated ? '本次已补齐' : 'ok'}`);
+  }
+  lines.push('');
+  lines.push(buildShortcutHint('repo'));
+  return lines.join('\n');
+}
+
+function formatRepoLogMessage(workspaceDir, repoLog) {
+  if (!repoLog?.ok) {
+    return [
+      '❌ 仓库历史获取失败',
+      repoLog?.error || '(unknown)',
+      `工作区：${workspaceDir}`,
+    ].join('\n');
+  }
+  if (!repoLog.commits?.length) {
+    return [
+      '🧾 最近提交',
+      `工作区：${workspaceDir}`,
+      '当前仓库还没有提交记录。',
+    ].join('\n');
+  }
+  const lines = [
+    '🧾 最近提交',
+    `工作区：${workspaceDir}`,
+  ];
+  repoLog.commits.forEach((item) => {
+    lines.push(`- ${item.hash} ${item.subject}`);
+    lines.push(`  时间：${formatIsoTimestamp(item.committedAt)}`);
+  });
+  lines.push('');
+  lines.push(buildShortcutHint('repo'));
+  return lines.join('\n');
+}
+
+function formatBranchListMessage(repoStatus) {
+  if (!repoStatus?.ok) {
+    return [
+      '❌ 分支信息获取失败',
+      repoStatus?.error || '(unknown)',
+    ].join('\n');
+  }
+  const lines = [
+    '🌿 分支列表',
+    `当前分支：${repoStatus.branch}`,
+  ];
+  if (!repoStatus.branches?.length) {
+    lines.push('当前仓库还没有可展示的分支。');
+  } else {
+    repoStatus.branches.slice(0, 10).forEach((item) => {
+      lines.push(`- ${item.current ? '* ' : ''}${item.name}`);
+    });
+  }
+  lines.push('');
+  lines.push('用 `/branch <name>` 可切换或创建新分支。');
+  return lines.join('\n');
+}
+
+function formatChangedFilesMessage(workspaceDir, changed) {
+  if (!changed?.ok) {
+    return [
+      '❌ 改动文件获取失败',
+      changed?.error || '(unknown)',
+      `工作区：${workspaceDir}`,
+    ].join('\n');
+  }
+  const { status, groups } = changed;
+  if (status.clean) {
+    return [
+      '🧾 当前没有改动文件',
+      `工作区：${workspaceDir}`,
+      `分支：${status.branch}`,
+    ].join('\n');
+  }
+  const lines = [
+    '🧾 改动文件',
+    `工作区：${workspaceDir}`,
+    `分支：${status.branch}`,
+    `汇总：staged ${status.counts.staged} | unstaged ${status.counts.unstaged} | untracked ${status.counts.untracked}`,
+  ];
+  if (groups.staged.length) {
+    lines.push('');
+    lines.push('Staged:');
+    groups.staged.forEach((file) => lines.push(`- ${file}`));
+  }
+  if (groups.unstaged.length) {
+    lines.push('');
+    lines.push('Unstaged:');
+    groups.unstaged.forEach((file) => lines.push(`- ${file}`));
+  }
+  if (groups.untracked.length) {
+    lines.push('');
+    lines.push('Untracked:');
+    groups.untracked.forEach((file) => lines.push(`- ${file}`));
+  }
+  lines.push('');
+  lines.push('可继续用：`/patch <文件>` ` /open <文件>` ` /commit <说明>`');
+  return lines.join('\n');
+}
+
+function formatDiffMessage(workspaceDir, report, mode) {
+  if (!report?.ok) {
+    return [
+      '❌ 差异获取失败',
+      report?.error || '(unknown)',
+      `工作区：${workspaceDir}`,
+    ].join('\n');
+  }
+  const status = report.status;
+  if (status.clean) {
+    return [
+      '🧩 当前没有改动',
+      `工作区：${workspaceDir}`,
+      `分支：${status.branch}`,
+    ].join('\n');
+  }
+  const lines = [
+    `🧩 Git Diff（${mode}）`,
+    `工作区：${workspaceDir}`,
+    `分支：${status.branch}`,
+  ];
+  if (report.stagedStat) {
+    lines.push('');
+    lines.push('Staged stat:');
+    lines.push(report.stagedStat);
+  }
+  if (report.workingStat) {
+    lines.push('');
+    lines.push('Working stat:');
+    lines.push(report.workingStat);
+  }
+  if (report.stagedPatch) {
+    lines.push('');
+    lines.push('Staged preview:');
+    lines.push(report.stagedPatch);
+  }
+  if (report.workingPatch) {
+    lines.push('');
+    lines.push('Working preview:');
+    lines.push(report.workingPatch);
+  }
+  lines.push('');
+  lines.push(buildShortcutHint('repo'));
+  return lines.join('\n');
+}
+
+function formatPatchMessage(workspaceDir, patch, target = '') {
+  if (!patch?.ok) {
+    return [
+      '❌ Patch 获取失败',
+      patch?.error || '(unknown)',
+      `工作区：${workspaceDir}`,
+    ].join('\n');
+  }
+  if (patch.noChanges) {
+    return [
+      '🧩 当前没有可展示的 patch',
+      `工作区：${workspaceDir}`,
+      ...(target ? [`目标：${target}`] : []),
+      '如果是未跟踪文件，可先用 `/open <文件>` 看内容。',
+    ].join('\n');
+  }
+  const lines = [
+    `🩹 Patch 预览${patch.relativePath ? `：${patch.relativePath}` : ''}`,
+    `工作区：${workspaceDir}`,
+    `分支：${patch.status?.branch || '(unknown)'}`,
+  ];
+  patch.sections.forEach((section) => {
+    lines.push('');
+    lines.push(`${section.label}:`);
+    lines.push(section.content);
+  });
+  lines.push('');
+  lines.push('提示：完整补丁可用 `/export diff` 导出到 workspace。');
+  return lines.join('\n');
+}
+
+function formatOpenFileMessage(workspaceDir, opened) {
+  if (!opened?.ok) {
+    return [
+      '❌ 打开文件失败',
+      opened?.error || '(unknown)',
+      `工作区：${workspaceDir}`,
+    ].join('\n');
+  }
+  if (opened.kind === 'directory') {
+    return [
+      `📁 目录：${opened.relativePath}`,
+      `工作区：${workspaceDir}`,
+      opened.preview || '(empty directory)',
+      ...(opened.truncated ? ['(目录过大，仅显示前 30 项)'] : []),
+    ].join('\n');
+  }
+  if (opened.kind === 'binary') {
+    return [
+      `📦 二进制文件：${opened.relativePath}`,
+      `工作区：${workspaceDir}`,
+      `大小：${formatBytes(opened.byteLength)}`,
+      `mime：${opened.mimeType || '(unknown)'}`,
+      '该文件不是可直接预览的文本内容。',
+    ].join('\n');
+  }
+  return [
+    `📄 文件：${opened.relativePath}`,
+    `工作区：${workspaceDir}`,
+    `大小：${formatBytes(opened.byteLength)}${opened.mimeType ? ` | mime=${opened.mimeType}` : ''}`,
+    '',
+    opened.preview || '(empty file)',
+    ...(opened.truncated ? ['', '(内容过长，仅显示前半部分)'] : []),
+  ].join('\n');
+}
+
+function formatExportMessage(workspaceDir, exported, mode) {
+  if (!exported?.ok) {
+    return [
+      '❌ 导出失败',
+      exported?.error || '(unknown)',
+      `工作区：${workspaceDir}`,
+    ].join('\n');
+  }
+  if (exported.noChanges) {
+    return [
+      '🧾 当前没有可导出的 diff',
+      `工作区：${workspaceDir}`,
+      `模式：${mode}`,
+    ].join('\n');
+  }
+  return [
+    '📦 已导出 diff 文件',
+    `工作区：${workspaceDir}`,
+    `分支：${exported.status?.branch || '(unknown)'}`,
+    `模式：${mode}`,
+    `文件：${exported.relativePath}`,
+    `大小：${formatBytes(exported.bytes)}`,
+    '你可以继续用 `/open .exports/...` 或让 Codex 基于这个 patch 继续处理。',
+  ].join('\n');
+}
+
+function formatRollbackMessage(workspaceDir, rolledBack, mode) {
+  if (!rolledBack?.ok) {
+    return [
+      '❌ 回退失败',
+      rolledBack?.error || '(unknown)',
+      `工作区：${workspaceDir}`,
+    ].join('\n');
+  }
+  const status = rolledBack.status;
+  const lines = [
+    '↩️ 已执行工作区回退',
+    `模式：${mode === 'all' ? 'all（含未跟踪文件，保留 .attachments/）' : 'tracked（仅已跟踪改动）'}`,
+    `工作区：${workspaceDir}`,
+  ];
+  if (status?.ok) {
+    lines.push(`当前状态：${status.clean ? 'clean' : `staged ${status.counts.staged} | unstaged ${status.counts.unstaged} | untracked ${status.counts.untracked}`}`);
+    lines.push(`当前分支：${status.branch}`);
+  }
+  lines.push('');
+  lines.push(buildShortcutHint('repo'));
+  return lines.join('\n');
+}
+
 function formatDiagnosticsMessage(event) {
   const runtime = getPeerRuntime(event.peerKey);
+  const session = getPeerSession(event.peerKey, event.kind);
+  const pendingActions = listPendingActions(runtime.pendingActions);
   const uptimeMs = Math.floor(process.uptime() * 1000);
-  return [
+  const heartbeatAge = gatewayRuntime.lastHeartbeatAckAt
+    ? formatDuration(Date.now() - gatewayRuntime.lastHeartbeatAckAt)
+    : '(none)';
+  const lines = [
     '🩺 诊断信息',
+    `版本：CodeX-to-QQ v${APP_VERSION} | Node ${process.version}`,
+    `Codex CLI：${codexHealth.version} via ${codexHealth.bin}`,
     `peer：${event.peerKey}`,
     `运行时长：${formatDuration(uptimeMs)}`,
     `网关 session：${state.gateway.sessionId || '(none)'}`,
@@ -2013,9 +3713,37 @@ function formatDiagnosticsMessage(event) {
     `最近错误：${state.gateway.lastError || '(none)'}`,
     `重连级别：${reconnectIndex}`,
     `当前连接：${ws ? '在线' : '离线'}`,
+    `网关模式：${gatewayRuntime.usingResume ? 'resume' : 'identify'} | 心跳：${gatewayRuntime.heartbeatIntervalMs || 0}ms | 最近 ACK：${heartbeatAge}`,
+    `最近关闭：${gatewayRuntime.lastCloseCode ?? '(none)'} ${gatewayRuntime.lastCloseReason || ''}`.trim(),
+    `会话超时连续次数：${gatewayRuntime.sessionTimeoutStreak} | gateway 要求重连次数：${gatewayRuntime.reconnectRequestedStreak}`,
+    `fresh identify 冷却到：${gatewayRuntime.forceFreshIdentifyUntil ? formatIsoTimestamp(new Date(gatewayRuntime.forceFreshIdentifyUntil).toISOString()) : '(off)'}`,
     `当前排队：${runtime.queue.length} | 处理中：${runtime.activeRun ? '是' : '否'}`,
+    `待确认操作：${pendingActions.length}`,
+    `快捷按钮：${formatQuickActionCapability(session.quickActionsCapability, QUICK_ACTION_RETRY_MS)}`,
+    `数字菜单：${runtime.textShortcutMenu ? `已激活（到 ${formatIsoTimestamp(runtime.textShortcutMenu.expiresAt)})` : '未激活'}`,
+    `图片 OCR：${IMAGE_OCR_MODE} | 后端：${resolveImageOcrBackend() || '(none)'}`,
+    `QQ API timeout：${QQ_API_TIMEOUT_MS > 0 ? `${QQ_API_TIMEOUT_MS}ms` : 'off'} | 下载 timeout：${QQ_DOWNLOAD_TIMEOUT_MS > 0 ? `${QQ_DOWNLOAD_TIMEOUT_MS}ms` : 'off'}`,
     `收消息：${state.telemetry.inboundMessages} | 发消息：${state.telemetry.outboundMessages} | 发送失败：${state.telemetry.outboundFailures}`,
     `完成：${state.telemetry.completedRuns} | 失败：${state.telemetry.failedRuns} | 取消：${state.telemetry.cancelledRuns} | 撤回：${state.telemetry.retracts}`,
+  ];
+  const hints = buildOperationalHints(event, session, runtime, { includeGateway: true, maxHints: 4 });
+  if (hints.length > 0) {
+    lines.push('');
+    lines.push('建议：');
+    for (const hint of hints) {
+      lines.push(`- ${hint}`);
+    }
+  }
+  return lines.join('\n');
+}
+
+function formatVersionMessage() {
+  return [
+    '🧾 版本信息',
+    `CodeX-to-QQ：v${APP_VERSION}`,
+    `Node.js：${process.version}`,
+    `Codex CLI：${codexHealth.version} via ${codexHealth.bin}`,
+    `平台：${process.platform} ${process.arch}`,
   ].join('\n');
 }
 
@@ -2121,17 +3849,15 @@ function clearPendingSummary(session) {
   session.pendingSummaryCreatedAt = null;
 }
 
-function rememberSessionId(session, sessionId, lastInputTokens = null, reason = 'run') {
+function rememberSessionId(session, sessionId, lastInputTokens = null, reason = 'run', updates = {}) {
   const normalized = String(sessionId || '').trim();
   if (!normalized) return;
-  const current = Array.isArray(session.sessionHistory) ? session.sessionHistory : [];
-  const nextItem = {
-    id: normalized,
+  session.sessionHistory = upsertSessionHistory(session.sessionHistory, normalized, {
     lastUsedAt: new Date().toISOString(),
     lastInputTokens: Number.isFinite(lastInputTokens) ? lastInputTokens : null,
     reason,
-  };
-  session.sessionHistory = [nextItem, ...current.filter((item) => item?.id !== normalized)].slice(0, 20);
+    ...updates,
+  }, SESSION_HISTORY_MAX);
 }
 
 async function acquireGlobalRunSlot(event, runtime, activeRun) {
@@ -2221,9 +3947,12 @@ function formatRecentFilesMessage(session) {
 }
 
 function formatSessionMessage(session) {
+  const currentHistory = session.codexThreadId ? getSessionHistoryEntry(session, session.codexThreadId) : null;
   return [
     '🧠 当前会话',
     `当前 session：${session.codexThreadId || '(下一条消息新建)'}`,
+    `标题：${currentHistory?.title || session.pendingSessionTitle || '(未命名)'}`,
+    `置顶：${currentHistory?.pinnedAt ? '是' : '否'}`,
     `工作区：${session.workspaceDir}`,
     `上下文 token：${session.lastInputTokens ?? 0}`,
     `profile：${session.profile || 'default'}`,
@@ -2231,19 +3960,25 @@ function formatSessionMessage(session) {
     session.pendingSummary ? `压缩摘要：已准备（来源 ${session.pendingSummarySourceSessionId || 'unknown'}）` : '压缩摘要：无',
     '',
     '操作建议：',
+    '- `/rename <标题>` 改当前会话标题',
+    '- `/pin` 置顶当前会话',
+    '- `/fork [新标题]` 开一个分支会话',
     '- `/new` 开新会话',
     '- `/sessions` 查看历史会话',
     '- `/resume <id>` 切回旧会话',
+    '',
+    buildShortcutHint('session'),
   ].join('\n');
 }
 
 function formatSessionHistoryMessage(session) {
   const currentSessionId = String(session.codexThreadId || '').trim();
-  const history = (Array.isArray(session.sessionHistory) ? session.sessionHistory : [])
-    .filter((item) => item?.id && item.id !== currentSessionId);
+  const history = getSessionHistoryChoices(session);
   const lines = ['🗂️ 最近会话'];
   if (currentSessionId) {
+    const currentItem = getSessionHistoryEntry(session, currentSessionId);
     lines.push(`- 当前：${currentSessionId}${session.lastInputTokens ? ` (tokens=${session.lastInputTokens})` : ''}`);
+    if (currentItem?.title) lines.push(`  标题：${currentItem.title}${currentItem.pinnedAt ? ' | 📌 已置顶' : ''}`);
   }
   if (history.length === 0) {
     lines.push(currentSessionId ? '- 暂无其他历史会话记录' : '- 暂无历史会话记录');
@@ -2251,12 +3986,15 @@ function formatSessionHistoryMessage(session) {
     lines.push('先发普通消息开始会话，之后可用 `/new` 切到新会话。');
     return lines.join('\n');
   }
-  for (const item of history.slice(0, 8)) {
-    lines.push(`- ${item.id}`);
-    lines.push(`  最近使用：${formatIsoTimestamp(item.lastUsedAt)} | 来源：${item.reason || 'run'}${item.lastInputTokens ? ` | tokens=${item.lastInputTokens}` : ''}`);
+  for (const [index, item] of history.slice(0, 8).entries()) {
+    lines.push(`- ${index + 1}. ${item.pinnedAt ? '📌 ' : ''}${item.id}`);
+    lines.push(`  标题：${item.title}`);
+    lines.push(`  最近使用：${formatIsoTimestamp(item.lastUsedAt)} | 来源：${item.reason || 'run'}${item.lastInputTokens ? ` | tokens=${item.lastInputTokens}` : ''}${item.parentSessionId ? ` | parent=${item.parentSessionId}` : ''}`);
+    if (item.lastPromptPreview) lines.push(`  最近请求：${item.lastPromptPreview}`);
+    if (item.lastAnswerPreview) lines.push(`  最近结果：${truncate(item.lastAnswerPreview, 120)}`);
   }
   lines.push('');
-  lines.push('用 `/resume <id>` 可以切回指定会话。');
+  lines.push('可直接回数字切回会话，也可以用 `/resume <编号|id>`、`/pin <编号|id>`、`/fork <编号|id>`。');
   return lines.join('\n');
 }
 
@@ -2327,6 +4065,29 @@ function updateSessionRecentFiles(session, attachments) {
 
   const deduped = session.recentFiles.filter((existing) => !incoming.some((item) => item.localPath === existing.localPath));
   session.recentFiles = [...incoming.reverse(), ...deduped].slice(0, RECENT_FILES_MAX);
+}
+
+function normalizeWorkspaceHistoryEntry(value) {
+  if (!value || typeof value !== 'object') return null;
+  const dir = String(value.dir || '').trim();
+  if (!dir) return null;
+  return {
+    dir: resolveWorkspaceDir(dir),
+    usedAt: normalizeIsoValue(value.usedAt) || new Date().toISOString(),
+  };
+}
+
+function rememberWorkspaceHistory(session, workspaceDir) {
+  if (!Array.isArray(session.workspaceHistory)) {
+    session.workspaceHistory = [];
+  }
+  const normalized = normalizeWorkspaceHistoryEntry({ dir: workspaceDir, usedAt: new Date().toISOString() });
+  if (!normalized) return;
+  const deduped = session.workspaceHistory
+    .map((item) => normalizeWorkspaceHistoryEntry(item))
+    .filter(Boolean)
+    .filter((item) => item.dir !== normalized.dir);
+  session.workspaceHistory = [normalized, ...deduped].slice(0, WORKSPACE_HISTORY_MAX);
 }
 
 function isDirectTextFile(ext, contentType, absolutePath) {
@@ -2403,6 +4164,81 @@ function runExtractorToStdout(command, args) {
     };
   }
   return { stdout: String(result.stdout || ''), error: '' };
+}
+
+function extractImageTextPreviewFromFile(absolutePath, attachment, limit) {
+  if (IMAGE_OCR_MODE === 'off') {
+    return { text: '', via: '', error: 'image ocr disabled', note: '图片 OCR 已关闭' };
+  }
+
+  if (!shouldAttemptImageOcr({
+    mode: IMAGE_OCR_MODE,
+    attachment,
+  })) {
+    return { text: '', via: '', error: '', note: '' };
+  }
+
+  const backend = resolveImageOcrBackend();
+  if (!backend) {
+    return { text: '', via: '', error: 'image ocr unavailable', note: '当前环境没有可用的图片 OCR 后端' };
+  }
+
+  const raw = backend === 'vision'
+    ? runExtractorToStdout('/usr/bin/swift', [path.join(ROOT, 'scripts', 'ocr-image.swift'), absolutePath])
+    : runExtractorToStdout('tesseract', [absolutePath, 'stdout']);
+  const text = sanitizeExtractedText(raw.stdout, limit);
+  if (text) {
+    return { text, via: backend, error: '' };
+  }
+  return {
+    text: '',
+    via: '',
+    error: raw.error || 'image ocr failed',
+    note: raw.error || '图片 OCR 未识别到可用文字',
+  };
+}
+
+function resolveImageOcrBackend() {
+  if (cachedImageOcrBackend !== undefined) return cachedImageOcrBackend;
+  if (IMAGE_OCR_MODE === 'off') {
+    cachedImageOcrBackend = '';
+    return cachedImageOcrBackend;
+  }
+
+  const visionScript = path.join(ROOT, 'scripts', 'ocr-image.swift');
+  if (process.platform === 'darwin' && fs.existsSync('/usr/bin/swift') && fs.existsSync(visionScript)) {
+    cachedImageOcrBackend = 'vision';
+    return cachedImageOcrBackend;
+  }
+
+  if (binaryExists('tesseract', ['--version'])) {
+    cachedImageOcrBackend = 'tesseract';
+    return cachedImageOcrBackend;
+  }
+
+  cachedImageOcrBackend = IMAGE_OCR_MODE === 'on' ? '' : '';
+  return cachedImageOcrBackend;
+}
+
+function detectImageMetadata(absolutePath) {
+  if (process.platform !== 'darwin' || !fs.existsSync('/usr/bin/sips')) {
+    return { width: null, height: null };
+  }
+  const result = spawnSync('/usr/bin/sips', ['-g', 'pixelWidth', '-g', 'pixelHeight', absolutePath], {
+    env: buildSpawnEnv(process.env),
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  if (result.status !== 0) {
+    return { width: null, height: null };
+  }
+  const output = String(result.stdout || '');
+  const widthMatch = output.match(/pixelWidth:\s*(\d+)/);
+  const heightMatch = output.match(/pixelHeight:\s*(\d+)/);
+  return {
+    width: widthMatch ? Number.parseInt(widthMatch[1], 10) : null,
+    height: heightMatch ? Number.parseInt(heightMatch[1], 10) : null,
+  };
 }
 
 function extractAgentMessageText(item) {
@@ -2634,12 +4470,28 @@ function startHeartbeat(socket, intervalMs) {
       clearHeartbeat();
       return;
     }
+    if (isGatewayHeartbeatOverdue(gatewayRuntime, Date.now(), GATEWAY_HEARTBEAT_ACK_GRACE_MS)) {
+      console.warn('⚠️ QQ heartbeat ack overdue; reconnecting gateway');
+      requestGatewayReconnect('heartbeat ack overdue', resolveGatewayReconnectDelay({
+        code: 4009,
+        reconnectIndex,
+        sessionTimeoutStreak: Math.max(1, gatewayRuntime.sessionTimeoutStreak),
+        defaultDelays: RECONNECT_DELAYS,
+      }));
+      return;
+    }
     if (socket.readyState === WebSocket.OPEN) {
       try {
+        noteGatewayHeartbeatSent(gatewayRuntime, Date.now());
         socket.send(JSON.stringify({ op: 1, d: state.gateway.lastSeq }));
       } catch (err) {
         console.error('QQ heartbeat failed:', safeError(err));
-        requestGatewayReconnect('heartbeat failed', 1000);
+        requestGatewayReconnect('heartbeat failed', resolveGatewayReconnectDelay({
+          code: 4009,
+          reconnectIndex,
+          sessionTimeoutStreak: Math.max(1, gatewayRuntime.sessionTimeoutStreak),
+          defaultDelays: RECONNECT_DELAYS,
+        }));
       }
     }
   }, intervalMs);
@@ -2697,6 +4549,15 @@ function buildSpawnEnv(env) {
   return out;
 }
 
+function binaryExists(command, args = ['--version']) {
+  const result = spawnSync(command, args, {
+    env: buildSpawnEnv(process.env),
+    stdio: 'ignore',
+    timeout: 5000,
+  });
+  return !result.error;
+}
+
 function getCodexCliHealth() {
   const check = spawnSync(CODEX_BIN, ['--version'], {
     env: buildSpawnEnv(process.env),
@@ -2720,13 +4581,14 @@ function getCodexCliHealth() {
   };
 }
 
-function ensureGitRepo(dir) {
-  const check = spawnSync('git', ['rev-parse', '--is-inside-work-tree'], {
-    cwd: dir,
-    stdio: 'ignore',
-  });
-  if (check.status === 0) return;
-  spawnSync('git', ['init'], { cwd: dir, stdio: 'ignore' });
+function readPackageVersion() {
+  try {
+    const raw = fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8');
+    const parsed = JSON.parse(raw);
+    return String(parsed?.version || '').trim() || '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
 }
 
 function acquireLock() {
@@ -2811,15 +4673,6 @@ function handleGatewayCloseCode(code) {
   }
 }
 
-function resolveReconnectDelay(code) {
-  if (code === 4008) return 30000;
-  if (code === 4004) return 1000;
-  if (code === 4006 || code === 4007 || code === 4009 || (code >= 4900 && code <= 4913)) {
-    return 1000;
-  }
-  return undefined;
-}
-
 function isImageAttachment(attachment) {
   const type = String(attachment?.content_type || '').toLowerCase();
   const name = String(attachment?.filename || '').toLowerCase();
@@ -2885,7 +4738,7 @@ function normalizePeerSessionState(peerKey, session, kind) {
 
   let dirty = false;
   const expectedKind = kind === 'group' ? 'group' : 'c2c';
-  const expectedWorkspace = resolveWorkspaceDir(path.join(WORKSPACE_ROOT, sanitizePeerKey(peerKey)));
+  const expectedWorkspace = getDefaultWorkspaceDir(peerKey);
 
   if (session.kind !== expectedKind) {
     session.kind = expectedKind;
@@ -2959,6 +4812,36 @@ function normalizePeerSessionState(peerKey, session, kind) {
     session.lastRun = null;
     dirty = true;
   }
+  if (session.lastPromptInput === undefined) {
+    session.lastPromptInput = null;
+    dirty = true;
+  } else if (session.lastPromptInput !== null) {
+    const normalized = sanitizeStoredPromptInput(session.lastPromptInput);
+    if (JSON.stringify(normalized) !== JSON.stringify(session.lastPromptInput)) {
+      session.lastPromptInput = normalized;
+      dirty = true;
+    }
+  }
+  if (session.lastPromptPreview === undefined) {
+    session.lastPromptPreview = null;
+    dirty = true;
+  } else if (session.lastPromptPreview !== null) {
+    const normalized = String(session.lastPromptPreview || '').replace(/\s+/g, ' ').trim() || null;
+    if (normalized !== session.lastPromptPreview) {
+      session.lastPromptPreview = normalized;
+      dirty = true;
+    }
+  }
+  if (session.lastPromptAt === undefined) {
+    session.lastPromptAt = null;
+    dirty = true;
+  } else if (session.lastPromptAt !== null) {
+    const normalized = normalizeIsoValue(session.lastPromptAt);
+    if (normalized !== session.lastPromptAt) {
+      session.lastPromptAt = normalized;
+      dirty = true;
+    }
+  }
   if (!Array.isArray(session.recentFiles)) {
     session.recentFiles = [];
     dirty = true;
@@ -2966,9 +4849,30 @@ function normalizePeerSessionState(peerKey, session, kind) {
     session.recentFiles = session.recentFiles.slice(0, RECENT_FILES_MAX);
     dirty = true;
   }
+  if (!Array.isArray(session.workspaceHistory)) {
+    session.workspaceHistory = [];
+    dirty = true;
+  } else if (session.workspaceHistory.length > WORKSPACE_HISTORY_MAX) {
+    session.workspaceHistory = session.workspaceHistory.slice(0, WORKSPACE_HISTORY_MAX);
+    dirty = true;
+  } else {
+    const normalized = session.workspaceHistory
+      .map((item) => normalizeWorkspaceHistoryEntry(item))
+      .filter(Boolean);
+    if (JSON.stringify(normalized) !== JSON.stringify(session.workspaceHistory)) {
+      session.workspaceHistory = normalized;
+      dirty = true;
+    }
+  }
   if (!Array.isArray(session.sessionHistory)) {
     session.sessionHistory = [];
     dirty = true;
+  } else {
+    const normalized = normalizeSessionHistory(session.sessionHistory, SESSION_HISTORY_MAX);
+    if (JSON.stringify(normalized) !== JSON.stringify(session.sessionHistory)) {
+      session.sessionHistory = normalized;
+      dirty = true;
+    }
   }
   if (session.pendingSummary === undefined) {
     session.pendingSummary = null;
@@ -2986,6 +4890,31 @@ function normalizePeerSessionState(peerKey, session, kind) {
   }
   if (session.pendingSummaryCreatedAt === undefined) {
     session.pendingSummaryCreatedAt = null;
+    dirty = true;
+  }
+  if (session.pendingSessionTitle === undefined) {
+    session.pendingSessionTitle = null;
+    dirty = true;
+  } else if (session.pendingSessionTitle !== null) {
+    const normalized = String(session.pendingSessionTitle || '').replace(/\s+/g, ' ').trim() || null;
+    if (normalized !== session.pendingSessionTitle) {
+      session.pendingSessionTitle = normalized;
+      dirty = true;
+    }
+  }
+  if (session.pendingForkSourceSessionId === undefined) {
+    session.pendingForkSourceSessionId = null;
+    dirty = true;
+  } else if (session.pendingForkSourceSessionId !== null) {
+    const normalized = String(session.pendingForkSourceSessionId || '').trim() || null;
+    if (normalized !== session.pendingForkSourceSessionId) {
+      session.pendingForkSourceSessionId = normalized;
+      dirty = true;
+    }
+  }
+  const normalizedQuickActions = normalizeQuickActionCapability(session.quickActionsCapability);
+  if (JSON.stringify(normalizedQuickActions) !== JSON.stringify(session.quickActionsCapability || null)) {
+    session.quickActionsCapability = normalizedQuickActions;
     dirty = true;
   }
 
@@ -3053,7 +4982,8 @@ function recordAudit(type, eventOrPeerKey, detail = '', extra = {}) {
 }
 
 function formatDuration(ms) {
-  const total = Math.max(0, Math.floor(ms / 1000));
+  const numeric = Number(ms);
+  const total = Number.isFinite(numeric) ? Math.max(0, Math.floor(numeric / 1000)) : 0;
   const hours = Math.floor(total / 3600);
   const minutes = Math.floor((total % 3600) / 60);
   const seconds = total % 60;

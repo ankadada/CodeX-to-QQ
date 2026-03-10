@@ -26,6 +26,13 @@ npm run doctor
 npm start
 ```
 
+Service lifecycle helpers are also available:
+
+```bash
+npm run service:restart
+npm run uninstall:service
+```
+
 ## Development Rules
 
 - keep changes focused and small
@@ -67,7 +74,12 @@ Please include:
 ## Good First Contributions
 
 - command UX polish
+- session-history UX (`/rename`, `/pin`, `/fork`)
+- queue/retry control flows
+- workspace git workflow (`/repo`, `/branch`, `/diff`, `/commit`, `/rollback`)
+- artifact inspection/export (`/changed`, `/patch`, `/open`, `/export diff`)
 - better diagnostics / audit formatting
+- service lifecycle and setup UX
 - README and FAQ improvements
 - Linux support refinements
 - test coverage for command parsing and session behavior

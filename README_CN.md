@@ -19,11 +19,11 @@
 - 独立 QQ Bot 凭证和独立 `.env`
 - 支持 QQ 单聊 C2C 与群聊 `@bot`
 - 每个 QQ 会话独立 Codex session / workspace
-- 支持 `/status`、`/progress`、`/stop`、`/new`、`/sessions`
+- 支持 `/status`、`/progress`、`/queue`、`/retry`、`/stop`、`/new`、`/sessions`、`/rename`、`/pin`、`/fork`、`/workspace`、`/repo`、`/changed`、`/patch`、`/open`、`/export`、`/branch`、`/diff`、`/commit`、`/rollback`、`/version`
 - 支持处理中的进展更新、排队、取消、自愈重试
-- 支持附件下载、图片输入、文档文本抽取
+- 支持附件下载、图片输入、文档文本抽取、可选图片 OCR
 - 支持上下文压缩、旧 session 自动恢复
-- 支持短控制消息快捷按钮
+- 支持短控制消息快捷按钮、纯文本模式下的数字快捷菜单，以及危险命令确认流
 - 支持 macOS `launchd` 与 Linux `systemd --user`
 
 ## 截图
@@ -82,6 +82,8 @@
 cp .env.example .env
 ```
 
+仓库自带的 `.env.example` 已把所有支持的运行参数都列出来了，直接按需改值即可。
+
 2. 填入你自己的 QQ Bot 凭证：
 
 - `QQBOT_APP_ID`
@@ -113,6 +115,13 @@ npm run install:service
 npm run service:status
 ```
 
+7. 常用服务生命周期命令：
+
+```bash
+npm run service:restart
+npm run uninstall:service
+```
+
 ## 长期运行
 
 ### macOS (`launchd`)
@@ -120,6 +129,8 @@ npm run service:status
 ```bash
 npm run install:launchd
 npm run service:status:launchd
+npm run service:restart:launchd
+npm run uninstall:launchd
 ```
 
 ### Linux (`systemd --user`)
@@ -127,6 +138,8 @@ npm run service:status:launchd
 ```bash
 npm run install:systemd
 npm run service:status:systemd
+npm run service:restart:systemd
+npm run uninstall:systemd
 ```
 
 ### 查看日志
@@ -145,28 +158,68 @@ journalctl --user -u codex-cli-qq.service -f
 
 - 直接发普通消息：交给 Codex 处理
 - `/help`
+- `/help quick`
 - `/whoami`
 - `/status`
 - `/state`
 - `/diag`
+- `/doctor`
+- `/version`
 - `/stats`
 - `/audit`
 - `/session`
 - `/sessions`
+- `/rename <标题>`
+- `/pin [session_id|clear]`
+- `/fork [source_session_id] [标题]`
 - `/history`
 - `/new`
 - `/start`
 - `/files`
+- `/workspace [show|recent|set <path|index>|reset]`
+- `/repo [status|log|path]`
+- `/changed`
+- `/patch [file]`
+- `/open <file>`
+- `/export diff [working|staged|all]`
+- `/branch [name]`
+- `/diff [working|staged|all]`
+- `/commit <message>`
+- `/rollback [tracked|all]`
 - `/progress`
+- `/queue`
 - `/cancel`
 - `/stop`
+- `/retry`
 - `/reset`
 - `/resume <session_id|clear>`
+- `/confirm-action list`
 - `/profile default|code|docs|review|image`
 - `/mode safe`
 - `/mode dangerous`
 - `/model <name|default>`
 - `/effort low|medium|high|default`
+
+## 常用场景
+
+- **先快速上手**
+  - 发 `/help quick`
+  - 再直接发一句普通话，让 Codex 开始工作
+- **继续上一个任务**
+  - 直接继续发消息
+  - 如果要重跑刚才那次，发 `/retry`
+- **切回旧会话**
+  - 发 `/sessions`
+  - 直接回数字，或用 `/resume <编号|id>`
+- **切到另一个项目目录**
+  - 发 `/workspace recent`
+  - 直接回数字，或用 `/workspace set demo`
+- **检查改动**
+  - 发 `/changed`
+  - 再用 `/diff`、`/open <文件>`、`/patch`
+- **高风险操作**
+  - 例如 `/rollback all`、`/mode dangerous`
+  - 系统会先要求你确认，若提示刷走了可发 `/confirm-action list`
 
 ## 推荐配置
 
@@ -185,13 +238,31 @@ journalctl --user -u codex-cli-qq.service -f
 - `MAX_AUTO_PROGRESS_PINGS=2`：限制自动进展次数
 - `PHASE_PROGRESS_NOTIFY=true`：关键阶段主动回报
 - `ENABLE_QUICK_ACTIONS=true`：短消息附带快捷按钮
+- `QUICK_ACTION_RETRY_MS=21600000`：如果某个 QQ 会话不支持自定义按钮，会自动降级成纯文本，并在稍后自动重试
+- `TEXT_SHORTCUT_TTL_MS=600000`：纯文本数字快捷菜单保留时长
+- `PENDING_ACTION_TTL_MS=600000`：危险操作确认菜单保留时长
 - `RETRACT_PROGRESS_MESSAGES=false`：默认建议关闭，QQ 会明显提示撤回
 - `DELIVERY_AUDIT_MAX=120`：保留最近审计记录
+- `QQ_API_TIMEOUT_MS=15000`：QQ API 请求超时
+- `QQ_DOWNLOAD_TIMEOUT_MS=30000`：附件下载超时
+- `IMAGE_OCR_MODE=auto`：图片 OCR（`auto` / `on` / `off`），`auto` 更偏向截图/界面图
+- `MAX_IMAGE_OCR_CHARS_PER_FILE=1200`：单张图片最多注入多少 OCR 文本
 
 ## 体验说明
 
 - 私聊里可以用 `/new` 主动开新会话
-- `/sessions` + `/resume <id>` 可以切回旧会话
+- `/sessions` + `/resume <编号|id>` 可以切回旧会话
+- `/rename`、`/pin`、`/fork` 可以把常用会话当成长期工作线程来管理
+- `/queue` 可查看运行中和排队中的任务，`/retry` 可以重试最近一次已执行请求
+- `/workspace set demo` 可快速切到 `WORKSPACE_ROOT/demo`，也可以直接设置绝对路径绑定现有项目
+- `/workspace recent` 可列出最近路径，直接回数字即可切换
+- 每个 workspace 同时也是一个轻量 Git 仓库，所以可以直接在 QQ 里用 `/repo`、`/branch`、`/diff`、`/commit`、`/rollback`
+- `/changed`、`/patch`、`/open`、`/export diff` 让你能直接在 QQ 里查看和导出实际产物
+- `/rollback all`、`/mode dangerous` 这类高风险操作现在会先要求确认
+- 忘了刚才的确认提示也没关系，发 `/confirm-action list` 就能找回，`/confirm-action latest confirm` 可直接处理最新一条
+- 如果 QQ 当前会话不支持自定义按钮，系统会自动降级为纯文本，避免重复报错但仍正常回复
+- `/help` 会根据当前会话是否为纯文本模式，自动切成更适合 QQ 手打的短命令菜单，并附带可直接回复的数字快捷项；也可以直接发 `/help quick`
+- 图片在作为图像输入交给 Codex 之外，还可以额外抽取 OCR 文本；`auto` 模式更偏向截图/报错界面，避免普通照片过度注入文本
 - QQ 客户端对按钮展示会有端差异
 - 进展消息撤回默认关闭，因为 QQ 的撤回提示通常比保留旧消息更烦
 

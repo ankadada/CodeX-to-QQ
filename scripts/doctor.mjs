@@ -9,10 +9,16 @@ import { fileURLToPath } from 'node:url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT = path.resolve(__dirname, '..');
+const ENV_FILE = path.join(ROOT, '.env');
+const PACKAGE_JSON_FILE = path.join(ROOT, 'package.json');
+const LOG_DIR = path.join(ROOT, 'logs');
+const DATA_DIR = path.join(ROOT, 'data');
 
 const QQBOT_APP_ID = String(process.env.QQBOT_APP_ID || '').trim();
 const QQBOT_CLIENT_SECRET = String(process.env.QQBOT_CLIENT_SECRET || '').trim();
 const CODEX_BIN = String(process.env.CODEX_BIN || 'codex').trim() || 'codex';
+const WORKSPACE_ROOT = path.resolve(ROOT, String(process.env.WORKSPACE_ROOT || './workspaces').trim() || './workspaces');
+const IMAGE_OCR_MODE = String(process.env.IMAGE_OCR_MODE || 'auto').trim().toLowerCase() || 'auto';
 
 const checks = [];
 
@@ -70,21 +76,99 @@ async function fetchJson(url, options = {}) {
 function launchdStatus() {
   if (process.platform !== 'darwin') return { ok: true, details: 'non-macOS host, skipped' };
   const label = `gui/${process.getuid()}/com.atou.codex-cli-qq`;
-  return runCommand('launchctl', ['print', label], { timeoutMs: 10000 });
+  const plistPath = path.join(os.homedir(), 'Library', 'LaunchAgents', 'com.atou.codex-cli-qq.plist');
+  if (!fs.existsSync(plistPath)) {
+    return { ok: true, details: 'not installed (foreground mode is fine)' };
+  }
+  const status = runCommand('launchctl', ['print', label], { timeoutMs: 10000 });
+  return status.ok
+    ? { ok: true, details: 'installed and reachable' }
+    : { ok: false, details: status.details };
+}
+
+function systemdStatus() {
+  if (process.platform !== 'linux') return { ok: true, details: 'non-Linux host, skipped' };
+  if (!commandExists('systemctl')) {
+    return { ok: true, details: 'systemctl not found (foreground mode only)' };
+  }
+  const unitPath = path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'systemd', 'user', 'codex-cli-qq.service');
+  if (!fs.existsSync(unitPath)) {
+    return { ok: true, details: 'not installed (foreground mode is fine)' };
+  }
+  const status = runCommand('systemctl', ['--user', 'is-enabled', 'codex-cli-qq.service'], { timeoutMs: 10000 });
+  if (!status.ok) {
+    return { ok: false, details: status.details };
+  }
+  return { ok: true, details: `installed (${status.details})` };
+}
+
+function serviceStatus() {
+  if (process.platform === 'darwin') return launchdStatus();
+  if (process.platform === 'linux') return systemdStatus();
+  return { ok: true, details: 'service checks skipped on this platform' };
+}
+
+function commandExists(command) {
+  const result = spawnSync(command, ['--help'], {
+    env: buildSpawnEnv(process.env),
+    stdio: 'ignore',
+    timeout: 5000,
+  });
+  return !result.error;
+}
+
+function readPackageVersion() {
+  try {
+    const raw = fs.readFileSync(PACKAGE_JSON_FILE, 'utf8');
+    const payload = JSON.parse(raw);
+    return String(payload?.version || '').trim() || 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+function ensureWritableDir(dirPath) {
+  try {
+    fs.mkdirSync(dirPath, { recursive: true });
+    fs.accessSync(dirPath, fs.constants.R_OK | fs.constants.W_OK);
+    return { ok: true, details: dirPath };
+  } catch (err) {
+    return { ok: false, details: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 async function main() {
+  const packageVersion = readPackageVersion();
+  const workspaceStatus = ensureWritableDir(WORKSPACE_ROOT);
+  const dataDirStatus = ensureWritableDir(DATA_DIR);
+  const logDirStatus = ensureWritableDir(LOG_DIR);
+  const stateFile = path.join(ROOT, 'data', 'state.json');
+
+  pushCheck('CodeX-to-QQ version', packageVersion !== 'unknown', packageVersion);
+  pushCheck('.env file', fs.existsSync(ENV_FILE), fs.existsSync(ENV_FILE) ? ENV_FILE : 'missing');
   pushCheck('.env / QQBOT_APP_ID', Boolean(QQBOT_APP_ID), QQBOT_APP_ID ? 'present' : 'missing');
   pushCheck('.env / QQBOT_CLIENT_SECRET', Boolean(QQBOT_CLIENT_SECRET), QQBOT_CLIENT_SECRET ? 'present' : 'missing');
 
   const codexVersion = runCommand(CODEX_BIN, ['--version']);
   pushCheck('Codex CLI binary', codexVersion.ok, codexVersion.details || CODEX_BIN);
+  const gitVersion = runCommand('git', ['--version']);
+  pushCheck('Git binary', gitVersion.ok, gitVersion.details || 'git');
+  if (IMAGE_OCR_MODE !== 'off') {
+    const visionScript = path.join(ROOT, 'scripts', 'ocr-image.swift');
+    const hasVision = process.platform === 'darwin' && fs.existsSync('/usr/bin/swift') && fs.existsSync(visionScript);
+    const tesseract = commandExists('tesseract');
+    pushCheck('Image OCR backend', hasVision || tesseract, hasVision ? 'vision(swift)' : tesseract ? 'tesseract' : 'none found');
+  } else {
+    pushCheck('Image OCR backend', true, 'disabled by IMAGE_OCR_MODE=off');
+  }
 
-  const stateFile = path.join(ROOT, 'data', 'state.json');
-  pushCheck('State file', fs.existsSync(stateFile), stateFile);
+  pushCheck('State file', true, fs.existsSync(stateFile) ? stateFile : 'not created yet (appears after first successful start)');
+  pushCheck('Workspace root', workspaceStatus.ok, workspaceStatus.details);
+  pushCheck('Data dir', dataDirStatus.ok, dataDirStatus.details);
+  pushCheck('Log dir', logDirStatus.ok, logDirStatus.details);
 
-  const launchd = launchdStatus();
-  pushCheck('launchd service', launchd.ok, launchd.ok ? 'running or loadable' : launchd.details);
+  const service = serviceStatus();
+  pushCheck('Service integration', service.ok, service.details);
 
   if (QQBOT_APP_ID && QQBOT_CLIENT_SECRET) {
     try {

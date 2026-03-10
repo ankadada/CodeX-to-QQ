@@ -19,11 +19,11 @@ It is designed for people who want to talk to Codex from QQ while keeping sessio
 - independent QQ bot credentials and `.env`
 - QQ C2C and group `@bot` support
 - per-peer Codex session and workspace isolation
-- `/status`, `/progress`, `/stop`, `/new`, `/sessions`, `/diag`, `/stats`, `/audit`
+- `/status`, `/progress`, `/queue`, `/retry`, `/stop`, `/new`, `/sessions`, `/rename`, `/pin`, `/fork`, `/workspace`, `/repo`, `/changed`, `/patch`, `/open`, `/export`, `/branch`, `/diff`, `/commit`, `/rollback`, `/diag`, `/version`, `/stats`, `/audit`
 - progress updates, queueing, cancellation, and session recovery
-- attachment download, image input forwarding, and text extraction
+- attachment download, image input forwarding, text extraction, and optional image OCR
 - context compaction and retry-on-stale-session behavior
-- quick-action keyboards for short control messages
+- quick-action keyboards for short control messages, plus numeric fallback menus and risky-command confirmations in plain-text QQ sessions
 - launchd support on macOS and systemd user-service support on Linux
 
 ## Screenshots
@@ -82,6 +82,8 @@ If you are exposing it beyond yourself, read [`SECURITY.md`](SECURITY.md) first.
 cp .env.example .env
 ```
 
+The bundled `.env.example` includes every supported runtime knob with safe starter values.
+
 2. Fill in your dedicated QQ bot credentials:
 
 - `QQBOT_APP_ID`
@@ -113,6 +115,13 @@ npm run install:service
 npm run service:status
 ```
 
+7. Common service lifecycle commands:
+
+```bash
+npm run service:restart
+npm run uninstall:service
+```
+
 ## Long-Running Service
 
 ### macOS (`launchd`)
@@ -120,6 +129,8 @@ npm run service:status
 ```bash
 npm run install:launchd
 npm run service:status:launchd
+npm run service:restart:launchd
+npm run uninstall:launchd
 ```
 
 ### Linux (`systemd --user`)
@@ -127,6 +138,8 @@ npm run service:status:launchd
 ```bash
 npm run install:systemd
 npm run service:status:systemd
+npm run service:restart:systemd
+npm run uninstall:systemd
 ```
 
 ### Logs
@@ -147,28 +160,68 @@ journalctl --user -u codex-cli-qq.service -f
 
 - send a normal message: hand it to Codex
 - `/help`
+- `/help quick`
 - `/whoami`
 - `/status`
 - `/state`
 - `/diag`
+- `/doctor`
+- `/version`
 - `/stats`
 - `/audit`
 - `/session`
 - `/sessions`
+- `/rename <title>`
+- `/pin [session_id|clear]`
+- `/fork [source_session_id] [title]`
 - `/history`
 - `/new`
 - `/start`
 - `/files`
+- `/workspace [show|recent|set <path|index>|reset]`
+- `/repo [status|log|path]`
+- `/changed`
+- `/patch [file]`
+- `/open <file>`
+- `/export diff [working|staged|all]`
+- `/branch [name]`
+- `/diff [working|staged|all]`
+- `/commit <message>`
+- `/rollback [tracked|all]`
 - `/progress`
+- `/queue`
 - `/cancel`
 - `/stop`
+- `/retry`
 - `/reset`
 - `/resume <session_id|clear>`
+- `/confirm-action list`
 - `/profile default|code|docs|review|image`
 - `/mode safe`
 - `/mode dangerous`
 - `/model <name|default>`
 - `/effort low|medium|high|default`
+
+## Common Workflows
+
+- **Quick start**
+  - send `/help quick`
+  - then send a normal message to let Codex start working
+- **Continue the last task**
+  - just keep chatting
+  - use `/retry` if you want to rerun the last executed request
+- **Jump back to an older session**
+  - send `/sessions`
+  - reply with a number, or use `/resume <index|id>`
+- **Switch to another project directory**
+  - send `/workspace recent`
+  - reply with a number, or use `/workspace set demo`
+- **Inspect changes**
+  - send `/changed`
+  - then use `/diff`, `/open <file>`, or `/patch`
+- **Risky operations**
+  - commands like `/rollback all` or `/mode dangerous`
+  - now require an explicit confirmation step; use `/confirm-action list` if the prompt scrolled away
 
 ## Recommended Defaults
 
@@ -187,13 +240,31 @@ journalctl --user -u codex-cli-qq.service -f
 - `MAX_AUTO_PROGRESS_PINGS=2`: cap periodic progress messages
 - `PHASE_PROGRESS_NOTIFY=true`: send milestone progress updates in private chat
 - `ENABLE_QUICK_ACTIONS=true`: attach quick-action keyboards to short control messages
+- `QUICK_ACTION_RETRY_MS=21600000`: if QQ rejects custom keyboards for this peer, auto-downgrade to plain text and retry later
+- `TEXT_SHORTCUT_TTL_MS=600000`: keep the plain-text numeric shortcut menu alive for a short time
+- `PENDING_ACTION_TTL_MS=600000`: keep risky-command confirmation menus alive for a short time
 - `RETRACT_PROGRESS_MESSAGES=false`: recommended; QQ visibly shows recall notices
 - `DELIVERY_AUDIT_MAX=120`: keep recent delivery/run audit entries
+- `QQ_API_TIMEOUT_MS=15000`: timeout for QQ API requests
+- `QQ_DOWNLOAD_TIMEOUT_MS=30000`: timeout for attachment downloads
+- `IMAGE_OCR_MODE=auto`: image OCR mode (`auto` / `on` / `off`); `auto` is biased toward screenshots / UI captures
+- `MAX_IMAGE_OCR_CHARS_PER_FILE=1200`: max OCR text injected per image
 
 ## UX Notes
 
 - private chat can proactively open a fresh session with `/new`
 - `/sessions` + `/resume <id>` lets you jump back to older sessions
+- `/rename`, `/pin`, `/fork` let you treat long-running Codex sessions as reusable “work threads”
+- `/queue` shows the active job plus pending backlog, and `/retry` replays the most recent executed prompt
+- `/workspace set demo` quickly moves a peer to `WORKSPACE_ROOT/demo`, while absolute paths let you bind an existing local project
+- `/workspace recent` lists recent paths and lets you switch by replying with a number
+- every workspace is also a lightweight Git repo, so `/repo`, `/branch`, `/diff`, `/commit`, and `/rollback` work directly in chat
+- `/changed`, `/patch`, `/open`, and `/export diff` make it easier to inspect and hand off actual workspace artifacts from QQ
+- risky operations like `/rollback all` and switching to `dangerous` mode now require an explicit confirmation step
+- if a confirmation prompt scrolls away, `/confirm-action list` brings it back and `/confirm-action latest confirm` handles the newest one directly
+- quick-action keyboards now auto-downgrade per peer when QQ rejects custom keyboards, so logs stay quieter and replies still arrive
+- `/help` now auto-switches to a shorter “QQ hand-typing menu” when the current peer is in text-only mode, with reply-by-number shortcuts; you can also jump straight to `/help quick`
+- images can optionally contribute OCR text in addition to being passed as image input; `auto` mode is biased toward screenshots and UI error captures instead of ordinary photos
 - quick-action keyboards are optimized for QQ mobile layout, but client rendering can still vary
 - progress recall is disabled by default because QQ shows a visible “message recalled” notice
 
