@@ -3,7 +3,7 @@
 [![CI](https://github.com/ankadada/CodeX-to-QQ/actions/workflows/ci.yml/badge.svg)](https://github.com/ankadada/CodeX-to-QQ/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/ankadada/CodeX-to-QQ)](./LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D20-3C873A)](https://nodejs.org/)
-[![Release](https://img.shields.io/badge/release-v0.2.0-2563EB)](./docs/releases/v0.2.0.md)
+[![Release](https://img.shields.io/github/v/release/ankadada/CodeX-to-QQ?sort=semver)](https://github.com/ankadada/CodeX-to-QQ/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-111827)](./README_CN.md#支持平台)
 
 [English](./README.md) · [安全说明](./SECURITY.md) · [贡献指南](./CONTRIBUTING.md) · [更新记录](./CHANGELOG.md)

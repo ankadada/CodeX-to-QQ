@@ -1,6 +1,6 @@
 {
   "name": "codex-cli-qq",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "QQ C2C/group bridge for Codex CLI with session management, progress updates, attachments, and self-hosted long-running service support.",
   "author": "ankadada",
   "license": "MIT",

@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## 0.2.1 - 2026-03-10
+
 ### Added
 
 - bundled `.env.example` with all supported runtime options
@@ -25,6 +27,11 @@ All notable changes to this project will be documented in this file.
 - `/status` and `/diag` now include more actionable next-step hints for text-only mode, queues, pending confirmations, and reconnect state
 - confirmation previews no longer get consumed just by checking status/details
 - each peer workspace now auto-seeds a local `.gitignore` so attachments stay out of commits by default
+
+### Notes
+
+- private QQ sessions now have a more complete text-only fallback, including numeric shortcut menus and `/help quick`
+- image OCR is optional and currently best for screenshots / UI captures rather than ordinary photos
 
 ## 0.2.0 - 2026-03-09
 
