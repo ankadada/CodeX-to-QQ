@@ -23,6 +23,7 @@ If you want to test against the real QQ gateway:
 
 ```bash
 npm run doctor
+npm run doctor:json
 npm start
 ```
 
@@ -59,6 +60,7 @@ If you changed QQ gateway behavior and have credentials available:
 
 ```bash
 npm run doctor
+npm run doctor:json
 ```
 
 ## Pull Request Notes

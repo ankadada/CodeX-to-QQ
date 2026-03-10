@@ -1,6 +1,6 @@
 {
   "name": "codex-cli-qq",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "QQ C2C/group bridge for Codex CLI with session management, progress updates, attachments, and self-hosted long-running service support.",
   "author": "ankadada",
   "license": "MIT",
@@ -28,10 +28,11 @@
   },
   "scripts": {
     "start": "node src/index.js",
-    "check": "node --check src/index.js && node --check src/context-compaction.js && node --check src/text-splitter.js && node --check src/session-history.js && node --check src/quick-actions.js && node --check src/workspace-git.js && node --check src/workspace-artifacts.js && node --check src/help-message.js && node --check src/text-shortcuts.js && node --check src/gateway-resilience.js && node --check src/pending-actions.js && node --check src/image-ocr.js && node --check scripts/doctor.mjs && bash -n scripts/*.sh",
+    "check": "node --check src/index.js && node --check src/context-compaction.js && node --check src/text-splitter.js && node --check src/session-history.js && node --check src/quick-actions.js && node --check src/workspace-git.js && node --check src/workspace-artifacts.js && node --check src/help-message.js && node --check src/text-shortcuts.js && node --check src/gateway-resilience.js && node --check src/pending-actions.js && node --check src/image-ocr.js && node --check src/doctor-report.js && node --check scripts/doctor.mjs && bash -n scripts/*.sh",
     "test": "node --test",
     "ci": "npm run check && npm test",
     "doctor": "node scripts/doctor.mjs",
+    "doctor:json": "node scripts/doctor.mjs --json",
     "install:service": "bash scripts/install-service.sh",
     "install:launchd": "bash scripts/install-launchd.sh",
     "install:systemd": "bash scripts/install-systemd.sh",

@@ -6,7 +6,7 @@
 [![Release](https://img.shields.io/github/v/release/ankadada/CodeX-to-QQ?sort=semver)](https://github.com/ankadada/CodeX-to-QQ/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-111827)](./README.md#supported-platforms)
 
-[中文说明](./README_CN.md) · [Security](./SECURITY.md) · [Contributing](./CONTRIBUTING.md) · [Changelog](./CHANGELOG.md)
+[中文说明](./README_CN.md) · [Security](./SECURITY.md) · [Troubleshooting](./docs/TROUBLESHOOTING.md) · [Contributing](./CONTRIBUTING.md) · [Changelog](./CHANGELOG.md)
 
 ![CodeX-to-QQ Logo](./docs/assets/logo.svg)
 
@@ -100,6 +100,7 @@ npm install
 ```bash
 npm run ci
 npm run doctor
+npm run doctor:json
 ```
 
 5. Start in foreground:
@@ -284,6 +285,8 @@ workspaces/<peer>/.attachments/<messageId>/
 ```
 
 ## FAQ
+
+For common setup and runtime issues, see [`docs/TROUBLESHOOTING.md`](./docs/TROUBLESHOOTING.md).
 
 ### Why are some buttons not fully visible?
 

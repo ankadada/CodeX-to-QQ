@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { buildDoctorSuggestions } from '../src/doctor-report.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,6 +20,7 @@ const QQBOT_CLIENT_SECRET = String(process.env.QQBOT_CLIENT_SECRET || '').trim()
 const CODEX_BIN = String(process.env.CODEX_BIN || 'codex').trim() || 'codex';
 const WORKSPACE_ROOT = path.resolve(ROOT, String(process.env.WORKSPACE_ROOT || './workspaces').trim() || './workspaces');
 const IMAGE_OCR_MODE = String(process.env.IMAGE_OCR_MODE || 'auto').trim().toLowerCase() || 'auto';
+const OUTPUT_JSON = process.argv.includes('--json');
 
 const checks = [];
 
@@ -197,9 +199,34 @@ async function main() {
 
   const failures = checks.filter((item) => !item.ok);
   const summary = failures.length === 0 ? 'PASS' : 'FAIL';
-  console.log(`codex-cli-qq doctor: ${summary}`);
-  for (const item of checks) {
-    console.log(`${item.ok ? '✅' : '❌'} ${item.name}${item.details ? ` — ${item.details}` : ''}`);
+  const suggestions = buildDoctorSuggestions(checks, {
+    platform: process.platform,
+    imageOcrMode: IMAGE_OCR_MODE,
+  });
+
+  if (OUTPUT_JSON) {
+    console.log(JSON.stringify({
+      ok: failures.length === 0,
+      summary,
+      generatedAt: new Date().toISOString(),
+      version: packageVersion,
+      platform: `${process.platform} ${process.arch}`,
+      imageOcrMode: IMAGE_OCR_MODE,
+      checks,
+      suggestions,
+    }, null, 2));
+  } else {
+    console.log(`codex-cli-qq doctor: ${summary}`);
+    for (const item of checks) {
+      console.log(`${item.ok ? '✅' : '❌'} ${item.name}${item.details ? ` — ${item.details}` : ''}`);
+    }
+    if (suggestions.length > 0) {
+      console.log('');
+      console.log('Next steps:');
+      for (const item of suggestions) {
+        console.log(`- ${item}`);
+      }
+    }
   }
 
   if (failures.length > 0) {

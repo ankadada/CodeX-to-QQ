@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## 0.2.2 - 2026-03-10
+
+### Added
+
+- `doctor:json` / `node scripts/doctor.mjs --json` machine-readable diagnostics output
+- dedicated troubleshooting docs in English and Chinese
+
+### Improved
+
+- `doctor` now prints actionable next-step suggestions based on failed checks
+- bug reports now explicitly ask for doctor / service / `/diag` diagnostics
+
 ## 0.2.1 - 2026-03-10
 
 ### Added

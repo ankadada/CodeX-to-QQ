@@ -6,7 +6,7 @@
 [![Release](https://img.shields.io/github/v/release/ankadada/CodeX-to-QQ?sort=semver)](https://github.com/ankadada/CodeX-to-QQ/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-111827)](./README_CN.md#支持平台)
 
-[English](./README.md) · [安全说明](./SECURITY.md) · [贡献指南](./CONTRIBUTING.md) · [更新记录](./CHANGELOG.md)
+[English](./README.md) · [安全说明](./SECURITY.md) · [故障排查](./docs/TROUBLESHOOTING_CN.md) · [贡献指南](./CONTRIBUTING.md) · [更新记录](./CHANGELOG.md)
 
 ![CodeX-to-QQ Logo](./docs/assets/logo.svg)
 
@@ -100,6 +100,7 @@ npm install
 ```bash
 npm run ci
 npm run doctor
+npm run doctor:json
 ```
 
 5. 前台启动：
@@ -282,6 +283,8 @@ workspaces/<peer>/.attachments/<messageId>/
 ```
 
 ## 常见问题
+
+常见安装和运行问题可优先参考 [`docs/TROUBLESHOOTING_CN.md`](./docs/TROUBLESHOOTING_CN.md)。
 
 ### 为什么按钮有时显示不全？
 

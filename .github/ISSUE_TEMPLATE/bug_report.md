@@ -17,6 +17,7 @@ Describe the problem in 1-3 sentences.
 - Codex CLI version:
 - Deployment mode: `launchd` / `systemd` / foreground
 - QQ mode: `c2c` / `group`
+- Project version / commit:
 
 ## Reproduction
 
@@ -35,6 +36,15 @@ What happened instead?
 ## Logs / Screenshots
 
 Paste only redacted logs and screenshots.
+
+## Diagnostics
+
+Please include, when possible:
+
+- `npm run doctor`
+- `npm run doctor:json`
+- `npm run service:status`
+- `/diag` output (if the bot can still reply)
 
 Do **not** include:
 
