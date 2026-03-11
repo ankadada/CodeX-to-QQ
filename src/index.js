@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { Readable } from 'node:stream';
 import { finished } from 'node:stream/promises';
@@ -85,21 +86,26 @@ import {
   listChangedFiles,
   openWorkspaceFile,
 } from './workspace-artifacts.js';
+import { extractInputTokensFromUsage } from './provider-usage.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT = path.resolve(__dirname, '..');
 const APP_VERSION = readPackageVersion();
+const PROVIDER = String(process.env.PROVIDER || 'codex').toLowerCase() === 'claude' ? 'claude' : 'codex';
+const CODEX_BIN = String(process.env.CODEX_BIN || 'codex').trim() || 'codex';
+const CLAUDE_BIN = String(process.env.CLAUDE_BIN || 'claude').trim() || 'claude';
+const PROVIDER_LABEL = PROVIDER === 'claude' ? 'Claude' : 'Codex';
 const DATA_DIR = path.join(ROOT, 'data');
-const STATE_FILE = path.join(DATA_DIR, 'state.json');
-const LOCK_FILE = path.join(DATA_DIR, 'bot.lock');
+const STATE_FILE = path.join(DATA_DIR, `state.${PROVIDER}.json`);
+const LEGACY_STATE_FILE = path.join(DATA_DIR, 'state.json');
+const LOCK_FILE = path.join(DATA_DIR, `bot.${PROVIDER}.lock`);
 
 const QQBOT_APP_ID = String(process.env.QQBOT_APP_ID || '').trim();
 const QQBOT_CLIENT_SECRET = String(process.env.QQBOT_CLIENT_SECRET || '').trim();
 const QQBOT_ALLOW_FROM = parseCsvSet(process.env.QQBOT_ALLOW_FROM);
 const QQBOT_ALLOW_GROUPS = parseCsvSet(process.env.QQBOT_ALLOW_GROUPS);
 const QQBOT_ENABLE_GROUP = String(process.env.QQBOT_ENABLE_GROUP || 'true').toLowerCase() !== 'false';
-const CODEX_BIN = String(process.env.CODEX_BIN || 'codex').trim() || 'codex';
 const DEFAULT_MODE = String(process.env.DEFAULT_MODE || 'dangerous').toLowerCase() === 'safe' ? 'safe' : 'dangerous';
 const DEFAULT_MODEL = String(process.env.DEFAULT_MODEL || '').trim() || null;
 const DEFAULT_EFFORT = normalizeEffort(process.env.DEFAULT_EFFORT || '');
@@ -176,16 +182,16 @@ if (!QQBOT_APP_ID || !QQBOT_CLIENT_SECRET) {
   process.exit(1);
 }
 
-const codexHealth = getCodexCliHealth();
-if (!codexHealth.ok) {
-  console.error(`Codex CLI unavailable: ${codexHealth.error}`);
+const cliHealth = PROVIDER === 'claude' ? getClaudeCliHealth() : getCodexCliHealth();
+if (!cliHealth.ok) {
+  console.error(`${PROVIDER} CLI unavailable: ${cliHealth.error}`);
   process.exit(1);
 }
 
 console.log(`${BOOT_LOG_MARKER} ${new Date().toISOString()}`);
 console.error(`${BOOT_LOG_MARKER} ${new Date().toISOString()}`);
-console.log(`🧩 Codex CLI: ${codexHealth.version} via ${codexHealth.bin}`);
-console.log(`🚀 CodeX-to-QQ: v${APP_VERSION}`);
+console.log(`🧩 ${PROVIDER === 'claude' ? 'Claude Code' : 'Codex'} CLI: ${cliHealth.version} via ${cliHealth.bin}`);
+console.log(`🚀 CodeX-to-QQ: v${APP_VERSION} (provider: ${PROVIDER})`);
 console.log(`🤖 QQ bot mode: ${QQBOT_ENABLE_GROUP ? 'c2c + group@' : 'c2c only'}`);
 console.log(`🔐 default mode: ${DEFAULT_MODE}`);
 console.log(`🗂️ workspace root: ${WORKSPACE_ROOT}`);
@@ -486,7 +492,7 @@ function getAccessDecision(event) {
     return {
       allowed: false,
       reply: event.kind === 'c2c',
-      message: '⛔ 当前用户未授权使用该 Codex QQ bot。',
+      message: `⛔ 当前用户未授权使用该 ${PROVIDER_LABEL} QQ bot。`,
     };
   }
   return { allowed: true, reply: false, message: '' };
@@ -616,7 +622,7 @@ async function handleImmediateCommand(event, content) {
       '🌿 已准备新的分支会话。',
       `来源会话：${parsed.sourceSessionId}`,
       `新标题：${branchTitle}`,
-      '下一条普通消息会基于该来源摘要开启一个全新的 Codex 会话。',
+      `下一条普通消息会基于该来源摘要开启一个全新的 ${PROVIDER_LABEL} 会话。`,
     ];
     if (cancelled.active) lines.push('当前运行中的任务已尝试取消。');
     if (cancelled.clearedQueued > 0) lines.push(`已清空 ${cancelled.clearedQueued} 个排队任务。`);
@@ -635,7 +641,7 @@ async function handleImmediateCommand(event, content) {
     const lines = ['🆕 已切换为新会话。'];
     if (cancelled.active) lines.push('当前运行中的任务已尝试取消。');
     if (cancelled.clearedQueued > 0) lines.push(`已清空 ${cancelled.clearedQueued} 个排队任务。`);
-    lines.push('下一条普通消息会开启新的 Codex 会话。');
+    lines.push(`下一条普通消息会开启新的 ${PROVIDER_LABEL} 会话。`);
     lines.push('旧会话 ID 已保留，可用 `/sessions` 查看后再 `/resume <id>`。');
     await replyText(event, lines.join('\n'), { quickActions: true, uiCategory: 'status', replaceUiCard: true });
     return;
@@ -908,7 +914,7 @@ async function handleImmediateCommand(event, content) {
       clearPendingSessionDraft(session);
       session.updatedAt = new Date().toISOString();
       saveState();
-      await replyText(event, '✅ 已清除当前绑定的 Codex session。下条消息会新建会话。');
+      await replyText(event, `✅ 已清除当前绑定的 ${PROVIDER_LABEL} session。下条消息会新建会话。`);
       return;
     }
     const targetSessionId = resolveSessionReference(session, raw) || raw;
@@ -921,7 +927,7 @@ async function handleImmediateCommand(event, content) {
     rememberSessionId(session, targetSessionId, null, 'manual-resume');
     session.updatedAt = new Date().toISOString();
     saveState();
-    await replyText(event, `✅ 已绑定 Codex session：${session.codexThreadId}`);
+    await replyText(event, `✅ 已绑定 ${PROVIDER_LABEL} session：${session.codexThreadId}`);
     return;
   }
 
@@ -937,7 +943,7 @@ async function handleImmediateCommand(event, content) {
         kind: 'mode-switch',
         title: '确认切换到 dangerous 模式',
         lines: [
-          'dangerous 模式下，Codex 可直接执行更激进的本地操作。',
+          `dangerous 模式下，${PROVIDER_LABEL} 可直接执行更激进的本地操作。`,
           '仅建议在你完全信任当前 QQ bot 和 workspace 时开启。',
         ],
         data: { nextMode },
@@ -1201,7 +1207,7 @@ async function executeJob(job, session, runtime) {
     startedAt: Date.now(),
     updatedAt: Date.now(),
     phase: 'starting',
-    latestActivity: '任务已开始，等待 Codex 首个事件…',
+    latestActivity: `任务已开始，等待 ${PROVIDER_LABEL} 首个事件…`,
     eventCount: 0,
     recentActivities: [],
     logs: [],
@@ -1336,7 +1342,7 @@ async function executeJob(job, session, runtime) {
       recordAudit('run-failed', job.event, result.error || '(unknown)');
       const logsPreview = result.logs.length ? truncate(result.logs.join('\n'), 1200) : '(none)';
       await replyText(job.event, [
-        '❌ Codex 执行失败',
+        `❌ ${PROVIDER_LABEL} 执行失败`,
         `error: ${result.error || 'unknown'}`,
         `logs: ${logsPreview}`,
         ...(notes.length ? [`notes: ${notes.join(' | ')}`] : []),
@@ -1379,10 +1385,38 @@ async function executeJob(job, session, runtime) {
 }
 
 async function runCodex({ session, prompt, imagePaths, activeRun, event = null, runtime = null }) {
-  const workspaceDir = resolveWorkspaceDir(session.workspaceDir || path.join(WORKSPACE_ROOT, sanitizePeerKey(activeRun.peerKey)));
+  const workspaceDir = normalizeWorkspaceDirForPeer(activeRun.peerKey, session.workspaceDir || getDefaultWorkspaceDir(activeRun.peerKey));
   session.workspaceDir = workspaceDir;
   ensureDir(workspaceDir);
   ensureWorkspaceGitRepo(workspaceDir);
+
+  if (PROVIDER === 'claude') {
+    const args = buildClaudeArgs({ session, workspaceDir, prompt, imagePaths });
+    return await spawnClaude(args, workspaceDir, {
+      timeoutMs: CODEX_TIMEOUT_MS,
+      onSpawn(child) { activeRun.child = child; },
+      onEvent(ev) {
+        const summary = summarizeClaudeEvent(ev);
+        if (summary) {
+          activeRun.eventCount += 1;
+          activeRun.phase = summary.phase;
+          activeRun.latestActivity = summary.text;
+          activeRun.updatedAt = Date.now();
+          rememberActivity(activeRun, summary.text);
+          if (event && runtime) maybeNotifyRunMilestone(event, runtime, activeRun);
+        }
+      },
+      onLog(line) {
+        if (isNoisyCodexLog(line)) return;
+        activeRun.logs.push(line);
+        if (activeRun.logs.length > LOG_HISTORY_MAX) activeRun.logs.shift();
+        activeRun.latestActivity = line;
+        activeRun.updatedAt = Date.now();
+        rememberActivity(activeRun, line);
+      },
+      wasCancelled() { return Boolean(activeRun.cancelRequested); },
+    });
+  }
 
   const args = buildCodexArgs({ session, workspaceDir, prompt, imagePaths });
   return await spawnCodex(args, workspaceDir, {
@@ -1443,6 +1477,149 @@ function buildCodexArgs({ session, workspaceDir, prompt, imagePaths = [] }) {
   }
 
   return args;
+}
+
+function buildClaudeArgs({ session, workspaceDir, prompt, imagePaths = [] }) {
+  const args = ['-p', '--verbose', '--output-format', 'stream-json', '--include-partial-messages'];
+  args.push('--add-dir', workspaceDir);
+
+  const model = session.model || DEFAULT_MODEL;
+  const effort = session.effort || DEFAULT_EFFORT;
+  if (model) args.push('--model', model);
+  if (effort) args.push('--effort', effort);
+
+  if (session.mode === 'dangerous') {
+    args.push('--dangerously-skip-permissions');
+  } else {
+    args.push('--permission-mode', 'acceptEdits');
+  }
+
+  if (session.codexThreadId) {
+    args.push('--resume', session.codexThreadId);
+  } else {
+    args.push('--session-id', randomUUID());
+  }
+
+  args.push('--', prompt);
+  return args;
+}
+
+function spawnClaude(args, cwd, options = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(CLAUDE_BIN, args, {
+      cwd,
+      env: buildSpawnEnv(process.env),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    options.onSpawn?.(child);
+
+    let stdoutBuf = '';
+    let stderrBuf = '';
+    let threadId = null;
+    let usage = null;
+    let resolved = false;
+    let timedOut = false;
+    const messages = [];
+    const finalAnswerMessages = [];
+    const reasonings = [];
+    const logs = [];
+
+    const timeoutMs = normalizeTimeoutMs(options.timeoutMs, 0);
+    const timeout = timeoutMs > 0
+      ? setTimeout(() => { timedOut = true; logs.push(`Timeout after ${timeoutMs}ms`); stopChildProcess(child); }, timeoutMs)
+      : null;
+
+    const handleLine = (line, source) => {
+      const trimmed = String(line || '').trim();
+      if (!trimmed) return;
+      if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+        try {
+          const ev = JSON.parse(trimmed);
+          if (DEBUG_EVENTS) console.log('[claude-event]', ev.type, ev);
+
+          if (ev.type === 'system') {
+            threadId = ev.session_id || threadId;
+          } else if (ev.type === 'assistant') {
+            const text = extractClaudeMessageText(ev);
+            if (text) messages.push(text);
+          } else if (ev.type === 'result') {
+            const text = typeof ev.result === 'string' ? ev.result.trim() : '';
+            if (text) finalAnswerMessages.push(text);
+            threadId = ev.session_id || threadId;
+            if (ev.usage) usage = ev.usage;
+          }
+
+          options.onEvent?.(ev);
+          return;
+        } catch { /* ignore non-JSON */ }
+      }
+      if (source === 'stderr' || DEBUG_EVENTS) logs.push(trimmed);
+      options.onLog?.(trimmed, source);
+    };
+
+    const onData = (chunk, source) => {
+      let buffer = source === 'stdout' ? stdoutBuf : stderrBuf;
+      buffer += chunk.toString('utf8');
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      for (const line of lines) handleLine(line, source);
+      if (source === 'stdout') stdoutBuf = buffer;
+      else stderrBuf = buffer;
+    };
+
+    child.stdout.on('data', (chunk) => onData(chunk, 'stdout'));
+    child.stderr.on('data', (chunk) => onData(chunk, 'stderr'));
+
+    child.on('error', (err) => {
+      if (resolved) return;
+      resolved = true;
+      if (timeout) clearTimeout(timeout);
+      resolve({
+        ok: false, exitCode: null, signal: null, messages,
+        finalAnswer: '', reasonings, usage, threadId,
+        logs: [...logs, safeError(err)], error: safeError(err),
+        timedOut, cancelled: Boolean(options.wasCancelled?.()),
+      });
+    });
+
+    child.on('close', (exitCode, signal) => {
+      if (resolved) return;
+      resolved = true;
+      if (timeout) clearTimeout(timeout);
+      if (stdoutBuf.trim()) handleLine(stdoutBuf, 'stdout');
+      if (stderrBuf.trim()) handleLine(stderrBuf, 'stderr');
+
+      const cancelled = Boolean(options.wasCancelled?.());
+      const ok = exitCode === 0 && !cancelled && !timedOut;
+      const error = ok ? null
+        : timedOut ? `timeout after ${timeoutMs}ms`
+        : cancelled ? `cancelled (${signal || `exit=${exitCode}`})`
+        : `exit=${exitCode}${signal ? ` signal=${signal}` : ''}`;
+
+      resolve({
+        ok, exitCode, signal, messages,
+        finalAnswer: finalAnswerMessages.join('\n\n').trim() || messages.join('\n\n').trim(),
+        reasonings, usage, threadId, logs, error, timedOut, cancelled,
+      });
+    });
+  });
+}
+
+function extractClaudeMessageText(ev) {
+  if (!ev || typeof ev !== 'object') return '';
+  if (ev.message && typeof ev.message === 'object' && Array.isArray(ev.message.content)) {
+    return ev.message.content
+      .map((item) => {
+        if (typeof item === 'string') return item;
+        if (item?.type === 'text') return item.text || '';
+        return '';
+      })
+      .join('\n')
+      .trim();
+  }
+  if (typeof ev.text === 'string') return ev.text.trim();
+  if (typeof ev.result === 'string') return ev.result.trim();
+  return '';
 }
 
 function spawnCodex(args, cwd, options = {}) {
@@ -2174,10 +2351,11 @@ function updateSessionFromResult(session, result, kind, activeRun = null) {
   const previousThreadId = String(session.codexThreadId || '').trim();
   const promptPreview = activeRun?.promptPreview || session.lastPromptPreview || '';
   const answerPreview = buildResultPreview(result);
+  const inputTokens = extractInputTokensFromUsage(result.usage);
   if (result.threadId) {
     session.codexThreadId = result.threadId;
     const isNewThread = !previousThreadId || previousThreadId !== String(result.threadId || '').trim();
-    rememberSessionId(session, result.threadId, result.usage?.input_tokens, isNewThread ? (session.pendingForkSourceSessionId ? 'fork' : 'run') : 'run', {
+    rememberSessionId(session, result.threadId, inputTokens, isNewThread ? (session.pendingForkSourceSessionId ? 'fork' : 'run') : 'run', {
       title: isNewThread
         ? (session.pendingSessionTitle || createAutoSessionTitle(promptPreview, result.threadId))
         : undefined,
@@ -2194,8 +2372,8 @@ function updateSessionFromResult(session, result, kind, activeRun = null) {
   } else if (!result.ok && kind === 'group') {
     session.codexThreadId = session.codexThreadId || null;
   }
-  if (Number.isFinite(result.usage?.input_tokens)) {
-    session.lastInputTokens = result.usage.input_tokens;
+  if (Number.isFinite(inputTokens)) {
+    session.lastInputTokens = inputTokens;
   }
   session.updatedAt = new Date().toISOString();
 }
@@ -2466,7 +2644,7 @@ function buildForkSummary(session, sourceItem, sourceSessionId) {
 }
 
 async function preparePromptInput({ event, session, promptInput, activeRun }) {
-  const workspaceDir = resolveWorkspaceDir(session.workspaceDir || path.join(WORKSPACE_ROOT, sanitizePeerKey(event.peerKey)));
+  const workspaceDir = normalizeWorkspaceDirForPeer(event.peerKey, session.workspaceDir || getDefaultWorkspaceDir(event.peerKey));
   const attachments = Array.isArray(promptInput?.attachments) ? promptInput.attachments : [];
   const notes = [];
   let preparedAttachments = attachments;
@@ -2510,10 +2688,12 @@ async function preparePromptInput({ event, session, promptInput, activeRun }) {
   saveState();
 
   return {
-    prompt: buildPromptFromMessage(promptInput?.text, preparedAttachments, extractedPreviews),
-    imagePaths: preparedAttachments
-      .filter((item) => item.localPath && item.isImage)
-      .map((item) => item.localPath),
+    prompt: buildPromptFromMessage(promptInput?.text, preparedAttachments, extractedPreviews, PROVIDER),
+    imagePaths: PROVIDER === 'codex'
+      ? preparedAttachments
+        .filter((item) => item.localPath && item.isImage)
+        .map((item) => item.localPath)
+      : [],
     notes,
   };
 }
@@ -2723,12 +2903,16 @@ function extractTextPreviewFromFile(absolutePath, attachment, limit) {
   return { text: '', via: '', error: 'unsupported extract type', note: '该文件类型暂不做自动文本提取' };
 }
 
-function buildPromptFromMessage(text, attachments, extractedPreviews = []) {
+function buildPromptFromMessage(text, attachments, extractedPreviews = [], provider = PROVIDER) {
   const lines = [];
   const body = String(text || '').trim();
   if (body) lines.push(body);
   if (attachments.length) {
-    lines.push(formatAttachmentsForPrompt(attachments));
+    lines.push(formatAttachmentsForPrompt(attachments, provider));
+  }
+  const providerAttachmentNote = buildProviderAttachmentNote(attachments, provider);
+  if (providerAttachmentNote) {
+    lines.push(providerAttachmentNote);
   }
   if (extractedPreviews.length) {
     lines.push(formatExtractedTextForPrompt(extractedPreviews));
@@ -2736,7 +2920,7 @@ function buildPromptFromMessage(text, attachments, extractedPreviews = []) {
   return lines.join('\n\n').trim();
 }
 
-function formatAttachmentsForPrompt(attachments) {
+function formatAttachmentsForPrompt(attachments, provider = PROVIDER) {
   const lines = ['Attachments:'];
   attachments.slice(0, 8).forEach((attachment, index) => {
     const parts = [
@@ -2750,7 +2934,8 @@ function formatAttachmentsForPrompt(attachments) {
       parts.push(`url=${attachment.sourceUrl}`);
     }
     if (attachment.isImage && attachment.localPath) {
-      parts.push('codex_image_input=true');
+      parts.push('image_file=true');
+      if (provider === 'codex') parts.push('codex_image_input=true');
       if (Number.isFinite(attachment.imageWidth) && Number.isFinite(attachment.imageHeight)) {
         parts.push(`dimensions=${attachment.imageWidth}x${attachment.imageHeight}`);
       }
@@ -2765,6 +2950,18 @@ function formatAttachmentsForPrompt(attachments) {
   });
   if (attachments.length > 8) {
     lines.push(`...and ${attachments.length - 8} more attachment(s).`);
+  }
+  return lines.join('\n');
+}
+
+function buildProviderAttachmentNote(attachments, provider = PROVIDER) {
+  if (provider !== 'claude') return '';
+  const hasLocalFiles = attachments.some((item) => item.localPath);
+  if (!hasLocalFiles) return '';
+  const hasLocalImages = attachments.some((item) => item.localPath && item.isImage);
+  const lines = ['Attachment handling note: local_path values are relative to the current workspace root.'];
+  if (hasLocalImages) {
+    lines.push('For image attachments, inspect the local file path directly; if OCR text is included below, treat it as a helpful preview instead of the full image content.');
   }
   return lines.join('\n');
 }
@@ -3233,14 +3430,24 @@ function formatQueueMessage(session, runtime) {
 }
 
 function getWorkspaceDirForSession(event, session) {
-  const workspaceDir = resolveWorkspaceDir(session.workspaceDir || getDefaultWorkspaceDir(event.peerKey));
+  const workspaceDir = normalizeWorkspaceDirForPeer(event.peerKey, session.workspaceDir || getDefaultWorkspaceDir(event.peerKey));
   session.workspaceDir = workspaceDir;
   ensureWorkspaceGitRepo(workspaceDir);
   return workspaceDir;
 }
 
 function getDefaultWorkspaceDir(peerKey) {
+  return resolveWorkspaceDir(path.join(WORKSPACE_ROOT, PROVIDER, sanitizePeerKey(peerKey)));
+}
+
+function getLegacyDefaultWorkspaceDir(peerKey) {
   return resolveWorkspaceDir(path.join(WORKSPACE_ROOT, sanitizePeerKey(peerKey)));
+}
+
+function normalizeWorkspaceDirForPeer(peerKey, workspaceDir) {
+  const normalized = resolveWorkspaceDir(workspaceDir);
+  if (!normalized) return getDefaultWorkspaceDir(peerKey);
+  return normalized === getLegacyDefaultWorkspaceDir(peerKey) ? getDefaultWorkspaceDir(peerKey) : normalized;
 }
 
 function getWorkspaceHistoryChoices(event, session) {
@@ -3666,7 +3873,7 @@ function formatExportMessage(workspaceDir, exported, mode) {
     `模式：${mode}`,
     `文件：${exported.relativePath}`,
     `大小：${formatBytes(exported.bytes)}`,
-    '你可以继续用 `/open .exports/...` 或让 Codex 基于这个 patch 继续处理。',
+    `你可以继续用 \`/open .exports/...\` 或让 ${PROVIDER_LABEL} 基于这个 patch 继续处理。`,
   ].join('\n');
 }
 
@@ -3704,7 +3911,7 @@ function formatDiagnosticsMessage(event) {
   const lines = [
     '🩺 诊断信息',
     `版本：CodeX-to-QQ v${APP_VERSION} | Node ${process.version}`,
-    `Codex CLI：${codexHealth.version} via ${codexHealth.bin}`,
+    `${PROVIDER_LABEL} CLI：${cliHealth.version} via ${cliHealth.bin}`,
     `peer：${event.peerKey}`,
     `运行时长：${formatDuration(uptimeMs)}`,
     `网关 session：${state.gateway.sessionId || '(none)'}`,
@@ -3742,7 +3949,7 @@ function formatVersionMessage() {
     '🧾 版本信息',
     `CodeX-to-QQ：v${APP_VERSION}`,
     `Node.js：${process.version}`,
-    `Codex CLI：${codexHealth.version} via ${codexHealth.bin}`,
+    `${PROVIDER_LABEL} CLI：${cliHealth.version} via ${cliHealth.bin}`,
     `平台：${process.platform} ${process.arch}`,
   ].join('\n');
 }
@@ -4022,6 +4229,23 @@ function summarizeCodexEvent(ev) {
   }
   if (ev.type === 'error') {
     return { phase: 'failed', text: typeof ev.error === 'string' ? ev.error : JSON.stringify(ev.error) };
+  }
+  return null;
+}
+
+function summarizeClaudeEvent(ev) {
+  if (!ev || typeof ev !== 'object') return null;
+  if (ev.type === 'system' && ev.subtype === 'init') {
+    return { phase: 'starting', text: '已创建 Claude 会话' };
+  }
+  if (ev.type === 'assistant') {
+    return { phase: 'answering', text: '模型正在生成回复…' };
+  }
+  if (ev.type === 'result') {
+    if (ev.subtype === 'success') {
+      return { phase: 'finalizing', text: 'Claude 已完成处理' };
+    }
+    return { phase: 'failed', text: `Claude 执行结束: ${ev.subtype || 'unknown'}` };
   }
   return null;
 }
@@ -4397,10 +4621,16 @@ function loadState() {
     peers: {},
   };
 
-  if (!fs.existsSync(STATE_FILE)) return fallback;
+  const sourceFile = fs.existsSync(STATE_FILE)
+    ? STATE_FILE
+    : (fs.existsSync(LEGACY_STATE_FILE) ? LEGACY_STATE_FILE : '');
+  if (!sourceFile) return fallback;
 
   try {
-    const parsed = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    const parsed = JSON.parse(fs.readFileSync(sourceFile, 'utf8'));
+    if (sourceFile === LEGACY_STATE_FILE) {
+      console.log(`ℹ️ migrating legacy state file to ${path.basename(STATE_FILE)}`);
+    }
     return {
       gateway: {
         sessionId: parsed?.gateway?.sessionId || null,
@@ -4414,7 +4644,7 @@ function loadState() {
     };
   } catch (err) {
     try {
-      fs.copyFileSync(STATE_FILE, `${STATE_FILE}.corrupt-${Date.now()}`);
+      fs.copyFileSync(sourceFile, `${sourceFile}.corrupt-${Date.now()}`);
     } catch {
     }
     console.error(`Failed to parse state file, using fallback: ${safeError(err)}`);
@@ -4546,6 +4776,8 @@ function buildSpawnEnv(env) {
     if (!entries.includes(entry)) entries.push(entry);
   }
   out.PATH = entries.join(delimiter);
+  delete out.CLAUDECODE;
+  delete out.CLAUDE_CODE;
   return out;
 }
 
@@ -4577,6 +4809,29 @@ function getCodexCliHealth() {
   return {
     ok: true,
     bin: CODEX_BIN,
+    version: (check.stdout || '').trim(),
+  };
+}
+
+function getClaudeCliHealth() {
+  const check = spawnSync(CLAUDE_BIN, ['--version'], {
+    env: buildSpawnEnv(process.env),
+    stdio: ['ignore', 'pipe', 'pipe'],
+    encoding: 'utf8',
+  });
+  if (check.error) {
+    return { ok: false, bin: CLAUDE_BIN, error: safeError(check.error) };
+  }
+  if (check.status !== 0) {
+    return {
+      ok: false,
+      bin: CLAUDE_BIN,
+      error: (check.stderr || check.stdout || `exit=${check.status}`).trim(),
+    };
+  }
+  return {
+    ok: true,
+    bin: CLAUDE_BIN,
     version: (check.stdout || '').trim(),
   };
 }
@@ -4739,6 +4994,7 @@ function normalizePeerSessionState(peerKey, session, kind) {
   let dirty = false;
   const expectedKind = kind === 'group' ? 'group' : 'c2c';
   const expectedWorkspace = getDefaultWorkspaceDir(peerKey);
+  const legacyWorkspace = getLegacyDefaultWorkspaceDir(peerKey);
 
   if (session.kind !== expectedKind) {
     session.kind = expectedKind;
@@ -4748,7 +5004,11 @@ function normalizePeerSessionState(peerKey, session, kind) {
     session.workspaceDir = expectedWorkspace;
     dirty = true;
   } else {
-    session.workspaceDir = resolveWorkspaceDir(session.workspaceDir);
+    const normalizedWorkspaceDir = normalizeWorkspaceDirForPeer(peerKey, session.workspaceDir);
+    if (normalizedWorkspaceDir !== session.workspaceDir) {
+      session.workspaceDir = normalizedWorkspaceDir;
+      dirty = true;
+    }
   }
   if (session.codexThreadId === undefined) {
     session.codexThreadId = null;
@@ -4856,9 +5116,21 @@ function normalizePeerSessionState(peerKey, session, kind) {
     session.workspaceHistory = session.workspaceHistory.slice(0, WORKSPACE_HISTORY_MAX);
     dirty = true;
   } else {
+    const seenWorkspaceDirs = new Set();
     const normalized = session.workspaceHistory
       .map((item) => normalizeWorkspaceHistoryEntry(item))
-      .filter(Boolean);
+      .filter(Boolean)
+      .map((item) => {
+        const normalizedDir = item.dir === legacyWorkspace
+          ? expectedWorkspace
+          : normalizeWorkspaceDirForPeer(peerKey, item.dir);
+        return normalizedDir === item.dir ? item : { ...item, dir: normalizedDir };
+      })
+      .filter((item) => {
+        if (seenWorkspaceDirs.has(item.dir)) return false;
+        seenWorkspaceDirs.add(item.dir);
+        return true;
+      });
     if (JSON.stringify(normalized) !== JSON.stringify(session.workspaceHistory)) {
       session.workspaceHistory = normalized;
       dirty = true;

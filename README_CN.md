@@ -10,7 +10,7 @@
 
 ![CodeX-to-QQ Logo](./docs/assets/logo.svg)
 
-这是一个自建的 `QQ -> Codex CLI` 桥接服务，适合把 Codex 接进 QQ 单聊或群聊 `@bot` 工作流里使用。
+这是一个自建的 `QQ -> Codex / Claude Code CLI` 桥接服务，适合把 Codex 或 Claude 接进 QQ 单聊或群聊 `@bot` 工作流里使用。
 
 它的目标不是一次性 demo，而是做成一个适合长期运行的桥接层：会话、工作区、进展反馈、附件处理、后台服务、诊断与审计都尽量补齐。
 
@@ -18,7 +18,7 @@
 
 - 独立 QQ Bot 凭证和独立 `.env`
 - 支持 QQ 单聊 C2C 与群聊 `@bot`
-- 每个 QQ 会话独立 Codex session / workspace
+- 每个 QQ 会话、每个 provider 独立 session / workspace
 - 支持 `/status`、`/progress`、`/queue`、`/retry`、`/stop`、`/new`、`/sessions`、`/rename`、`/pin`、`/fork`、`/workspace`、`/repo`、`/changed`、`/patch`、`/open`、`/export`、`/branch`、`/diff`、`/commit`、`/rollback`、`/version`
 - 支持处理中的进展更新、排队、取消、自愈重试
 - 支持附件下载、图片输入、文档文本抽取、可选图片 OCR
@@ -42,7 +42,7 @@
 
 - 个人自建使用
 - 小范围可信团队内部使用
-- 已经在本机或自有主机运行 Codex CLI 的用户
+- 已经在本机或自有主机运行 Codex CLI / Claude Code 的用户
 
 不太适合直接裸跑的场景：
 
@@ -54,9 +54,9 @@
 
 这个项目可以：
 
-- 触发 Codex CLI 执行任务
+- 触发当前 provider 执行任务
 - 下载附件到本地
-- 让 Codex 读写 workspace 文件
+- 让当前 provider 读写 workspace 文件
 - 在 `dangerous` 模式下更自由地执行
 
 如果你不是纯自用，请先读 [`SECURITY.md`](./SECURITY.md)。
@@ -71,7 +71,7 @@
 
 - Node.js `>=20`
 - npm
-- 已安装 Codex CLI，并能通过 `PATH` 或 `CODEX_BIN` 找到
+- 已安装 Codex CLI 或 Claude Code，并能通过 `PATH`、`CODEX_BIN` / `CLAUDE_BIN` 找到
 - 一个独立的 QQ Bot `AppID / ClientSecret`
 
 ## 快速开始
@@ -83,6 +83,8 @@ cp .env.example .env
 ```
 
 仓库自带的 `.env.example` 已把所有支持的运行参数都列出来了，直接按需改值即可。
+
+如果你想用 Claude Code，把 `PROVIDER=claude` 打开即可；不改时默认仍走 Codex。
 
 2. 填入你自己的 QQ Bot 凭证：
 
@@ -157,7 +159,7 @@ journalctl --user -u codex-cli-qq.service -f
 
 ## 命令列表
 
-- 直接发普通消息：交给 Codex 处理
+- 直接发普通消息：交给当前 provider 处理
 - `/help`
 - `/help quick`
 - `/whoami`
@@ -205,7 +207,7 @@ journalctl --user -u codex-cli-qq.service -f
 
 - **先快速上手**
   - 发 `/help quick`
-  - 再直接发一句普通话，让 Codex 开始工作
+  - 再直接发一句普通消息，让当前 provider 开始工作
 - **继续上一个任务**
   - 直接继续发消息
   - 如果要重跑刚才那次，发 `/retry`
@@ -229,7 +231,7 @@ journalctl --user -u codex-cli-qq.service -f
 - `QQBOT_ENABLE_GROUP=true`：开启群聊 `@bot`
 - `DEFAULT_MODE=dangerous`：适合你自己完全信任的自建环境
 - `SHOW_REASONING=false`：避免长输出刷屏
-- `DOWNLOAD_ATTACHMENTS=true`：让 Codex 直接读附件
+- `DOWNLOAD_ATTACHMENTS=true`：让当前 provider 直接读附件
 - `EXTRACT_ATTACHMENT_TEXT=true`：更适合“总结这个文件”这类场景
 - `MAX_GLOBAL_ACTIVE_RUNS=2`：避免机器被打满
 - `COMPACT_CONTEXT_ON_THRESHOLD=true`：上下文过长时先压缩再续聊
@@ -263,7 +265,7 @@ journalctl --user -u codex-cli-qq.service -f
 - 忘了刚才的确认提示也没关系，发 `/confirm-action list` 就能找回，`/confirm-action latest confirm` 可直接处理最新一条
 - 如果 QQ 当前会话不支持自定义按钮，系统会自动降级为纯文本，避免重复报错但仍正常回复
 - `/help` 会根据当前会话是否为纯文本模式，自动切成更适合 QQ 手打的短命令菜单，并附带可直接回复的数字快捷项；也可以直接发 `/help quick`
-- 图片在作为图像输入交给 Codex 之外，还可以额外抽取 OCR 文本；`auto` 模式更偏向截图/报错界面，避免普通照片过度注入文本
+- 图片除了会按当前 provider 的能力参与上下文，还可以额外抽取 OCR 文本；`auto` 模式更偏向截图/报错界面，避免普通照片过度注入文本
 - QQ 客户端对按钮展示会有端差异
 - 进展消息撤回默认关闭，因为 QQ 的撤回提示通常比保留旧消息更烦
 

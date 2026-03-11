@@ -10,18 +10,18 @@
 
 ![CodeX-to-QQ Logo](./docs/assets/logo.svg)
 
-Self-hosted `QQ -> Codex CLI` bridge for private chat and group `@bot` workflows.
+Self-hosted `QQ -> Codex / Claude Code CLI` bridge for private chat and group `@bot` workflows.
 
-It is designed for people who want to talk to Codex from QQ while keeping sessions, workspaces, long-running service behavior, and attachment handling under their own control.
+It is designed for people who want to talk to Codex or Claude from QQ while keeping sessions, workspaces, long-running service behavior, and attachment handling under their own control.
 
 ## Highlights
 
 - independent QQ bot credentials and `.env`
 - QQ C2C and group `@bot` support
-- per-peer Codex session and workspace isolation
+- per-peer, per-provider session and workspace isolation
 - `/status`, `/progress`, `/queue`, `/retry`, `/stop`, `/new`, `/sessions`, `/rename`, `/pin`, `/fork`, `/workspace`, `/repo`, `/changed`, `/patch`, `/open`, `/export`, `/branch`, `/diff`, `/commit`, `/rollback`, `/diag`, `/version`, `/stats`, `/audit`
 - progress updates, queueing, cancellation, and session recovery
-- attachment download, image input forwarding, text extraction, and optional image OCR
+- attachment download, provider-aware image handling, text extraction, and optional image OCR
 - context compaction and retry-on-stale-session behavior
 - quick-action keyboards for short control messages, plus numeric fallback menus and risky-command confirmations in plain-text QQ sessions
 - launchd support on macOS and systemd user-service support on Linux
@@ -42,7 +42,7 @@ Good fit:
 
 - personal self-hosted use
 - trusted small-team internal use
-- power users who already run Codex CLI locally
+- power users who already run Codex CLI or Claude Code locally
 
 Not a great fit without extra hardening:
 
@@ -54,9 +54,9 @@ Not a great fit without extra hardening:
 
 This project can:
 
-- execute Codex CLI tasks
+- execute Codex CLI or Claude Code tasks
 - download attachments to local disk
-- let Codex read/write workspace files
+- let the configured CLI read/write workspace files
 - run in `dangerous` mode
 
 If you are exposing it beyond yourself, read [`SECURITY.md`](SECURITY.md) first.
@@ -71,7 +71,7 @@ If you are exposing it beyond yourself, read [`SECURITY.md`](SECURITY.md) first.
 
 - Node.js `>=20`
 - npm
-- Codex CLI installed and available on `PATH` or via `CODEX_BIN`
+- Codex CLI or Claude Code installed and available on `PATH` via `CODEX_BIN` / `CLAUDE_BIN`
 - a dedicated QQ bot AppID / ClientSecret
 
 ## Quick Start
@@ -83,6 +83,8 @@ cp .env.example .env
 ```
 
 The bundled `.env.example` includes every supported runtime knob with safe starter values.
+
+If you want to use Claude Code, set `PROVIDER=claude`; otherwise the default stays on Codex.
 
 2. Fill in your dedicated QQ bot credentials:
 
@@ -159,7 +161,7 @@ journalctl --user -u codex-cli-qq.service -f
 
 ## Commands
 
-- send a normal message: hand it to Codex
+- send a normal message: hand it to the active provider
 - `/help`
 - `/help quick`
 - `/whoami`
@@ -207,7 +209,7 @@ journalctl --user -u codex-cli-qq.service -f
 
 - **Quick start**
   - send `/help quick`
-  - then send a normal message to let Codex start working
+  - then send a normal message to let the active provider start working
 - **Continue the last task**
   - just keep chatting
   - use `/retry` if you want to rerun the last executed request
@@ -231,7 +233,7 @@ journalctl --user -u codex-cli-qq.service -f
 - `QQBOT_ENABLE_GROUP=true`: enable group `@bot`
 - `DEFAULT_MODE=dangerous`: convenient for personal-only trusted use
 - `SHOW_REASONING=false`: avoid flooding QQ
-- `DOWNLOAD_ATTACHMENTS=true`: let Codex read downloaded files directly
+- `DOWNLOAD_ATTACHMENTS=true`: let the active provider read downloaded files directly
 - `EXTRACT_ATTACHMENT_TEXT=true`: improve “summarize this document” style prompts
 - `MAX_GLOBAL_ACTIVE_RUNS=2`: avoid saturating the machine
 - `COMPACT_CONTEXT_ON_THRESHOLD=true`: summarize before forcing a hard reset
@@ -255,7 +257,7 @@ journalctl --user -u codex-cli-qq.service -f
 
 - private chat can proactively open a fresh session with `/new`
 - `/sessions` + `/resume <id>` lets you jump back to older sessions
-- `/rename`, `/pin`, `/fork` let you treat long-running Codex sessions as reusable “work threads”
+- `/rename`, `/pin`, `/fork` let you treat long-running provider sessions as reusable “work threads”
 - `/queue` shows the active job plus pending backlog, and `/retry` replays the most recent executed prompt
 - `/workspace set demo` quickly moves a peer to `WORKSPACE_ROOT/demo`, while absolute paths let you bind an existing local project
 - `/workspace recent` lists recent paths and lets you switch by replying with a number
@@ -306,7 +308,7 @@ To avoid credential confusion, isolate permissions, and reduce blast radius if y
 
 ### Why does the project keep `data/` and `workspaces/` locally?
 
-They store session state, audit history, downloaded attachments, and per-peer workspaces so Codex can continue context-aware work across chats.
+They store session state, audit history, downloaded attachments, and per-peer workspaces so the active provider can continue context-aware work across chats.
 
 ## Development
 

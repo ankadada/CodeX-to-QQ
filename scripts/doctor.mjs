@@ -17,7 +17,11 @@ const DATA_DIR = path.join(ROOT, 'data');
 
 const QQBOT_APP_ID = String(process.env.QQBOT_APP_ID || '').trim();
 const QQBOT_CLIENT_SECRET = String(process.env.QQBOT_CLIENT_SECRET || '').trim();
+const PROVIDER = String(process.env.PROVIDER || 'codex').toLowerCase() === 'claude' ? 'claude' : 'codex';
 const CODEX_BIN = String(process.env.CODEX_BIN || 'codex').trim() || 'codex';
+const CLAUDE_BIN = String(process.env.CLAUDE_BIN || 'claude').trim() || 'claude';
+const PROVIDER_LABEL = PROVIDER === 'claude' ? 'Claude Code' : 'Codex CLI';
+const ACTIVE_BIN = PROVIDER === 'claude' ? CLAUDE_BIN : CODEX_BIN;
 const WORKSPACE_ROOT = path.resolve(ROOT, String(process.env.WORKSPACE_ROOT || './workspaces').trim() || './workspaces');
 const IMAGE_OCR_MODE = String(process.env.IMAGE_OCR_MODE || 'auto').trim().toLowerCase() || 'auto';
 const OUTPUT_JSON = process.argv.includes('--json');
@@ -144,15 +148,17 @@ async function main() {
   const workspaceStatus = ensureWritableDir(WORKSPACE_ROOT);
   const dataDirStatus = ensureWritableDir(DATA_DIR);
   const logDirStatus = ensureWritableDir(LOG_DIR);
-  const stateFile = path.join(ROOT, 'data', 'state.json');
+  const stateFile = path.join(ROOT, 'data', `state.${PROVIDER}.json`);
+  const legacyStateFile = path.join(ROOT, 'data', 'state.json');
 
   pushCheck('CodeX-to-QQ version', packageVersion !== 'unknown', packageVersion);
   pushCheck('.env file', fs.existsSync(ENV_FILE), fs.existsSync(ENV_FILE) ? ENV_FILE : 'missing');
   pushCheck('.env / QQBOT_APP_ID', Boolean(QQBOT_APP_ID), QQBOT_APP_ID ? 'present' : 'missing');
   pushCheck('.env / QQBOT_CLIENT_SECRET', Boolean(QQBOT_CLIENT_SECRET), QQBOT_CLIENT_SECRET ? 'present' : 'missing');
 
-  const codexVersion = runCommand(CODEX_BIN, ['--version']);
-  pushCheck('Codex CLI binary', codexVersion.ok, codexVersion.details || CODEX_BIN);
+  pushCheck('Provider', true, PROVIDER);
+  const cliVersion = runCommand(ACTIVE_BIN, ['--version']);
+  pushCheck(`${PROVIDER_LABEL} binary`, cliVersion.ok, cliVersion.details || ACTIVE_BIN);
   const gitVersion = runCommand('git', ['--version']);
   pushCheck('Git binary', gitVersion.ok, gitVersion.details || 'git');
   if (IMAGE_OCR_MODE !== 'off') {
@@ -164,7 +170,9 @@ async function main() {
     pushCheck('Image OCR backend', true, 'disabled by IMAGE_OCR_MODE=off');
   }
 
-  pushCheck('State file', true, fs.existsSync(stateFile) ? stateFile : 'not created yet (appears after first successful start)');
+  pushCheck('State file', true, fs.existsSync(stateFile)
+    ? stateFile
+    : (fs.existsSync(legacyStateFile) ? `${legacyStateFile} (legacy, will migrate on next start)` : 'not created yet (appears after first successful start)'));
   pushCheck('Workspace root', workspaceStatus.ok, workspaceStatus.details);
   pushCheck('Data dir', dataDirStatus.ok, dataDirStatus.details);
   pushCheck('Log dir', logDirStatus.ok, logDirStatus.details);
@@ -202,6 +210,7 @@ async function main() {
   const suggestions = buildDoctorSuggestions(checks, {
     platform: process.platform,
     imageOcrMode: IMAGE_OCR_MODE,
+    provider: PROVIDER,
   });
 
   if (OUTPUT_JSON) {
@@ -210,6 +219,7 @@ async function main() {
       summary,
       generatedAt: new Date().toISOString(),
       version: packageVersion,
+      provider: PROVIDER,
       platform: `${process.platform} ${process.arch}`,
       imageOcrMode: IMAGE_OCR_MODE,
       checks,
