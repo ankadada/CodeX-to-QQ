@@ -1,7 +1,7 @@
 {
   "name": "codex-cli-qq",
-  "version": "0.2.2",
-  "description": "QQ C2C/group bridge for Codex CLI with session management, progress updates, attachments, and self-hosted long-running service support.",
+  "version": "0.2.3",
+  "description": "QQ C2C/group bridge for Codex CLI and Claude Code with sessions, progress updates, attachments, and self-hosted service support.",
   "author": "ankadada",
   "license": "MIT",
   "type": "module",
@@ -10,6 +10,7 @@
   },
   "keywords": [
     "codex",
+    "claude",
     "qq",
     "bot",
     "bridge",

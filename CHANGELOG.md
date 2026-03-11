@@ -4,6 +4,25 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## 0.2.3 - 2026-03-11
+
+### Added
+
+- optional `PROVIDER=claude` / `CLAUDE_BIN` support for running the bridge on Claude Code
+- provider-aware token-usage parser and automated coverage for Claude-specific usage shapes
+
+### Improved
+
+- `doctor` now reports the active provider, checks the matching CLI binary, and understands provider-specific state files
+- default workspaces and state files are now isolated per provider to avoid Codex / Claude session collisions
+- Claude attachment handling now relies on workspace file paths and OCR previews instead of unsupported image CLI flags
+- English / Chinese docs now explain how to opt into Claude Code while keeping Codex as the default path
+
+### Notes
+
+- Codex remains the default provider; set `PROVIDER=claude` in `.env` to opt in
+- existing `data/state.json` is still recognized and will be migrated forward into provider-scoped state on the next successful start
+
 ## 0.2.2 - 2026-03-10
 
 ### Added
