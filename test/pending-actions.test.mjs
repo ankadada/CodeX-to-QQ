@@ -12,15 +12,16 @@ import {
 
 test('createPendingAction stores tokenized confirmation and consume clears it', () => {
   const actions = {};
+  const now = Date.parse('2026-03-10T10:00:00.000Z');
   createPendingAction(actions, 'tok-1', {
     kind: 'dangerous-mode',
     title: '切换 dangerous',
     data: { mode: 'dangerous' },
-  }, Date.parse('2026-03-10T10:00:00.000Z'));
+  }, now);
 
-  assert.equal(peekPendingAction(actions, 'tok-1')?.kind, 'dangerous-mode');
-  assert.equal(consumePendingAction(actions, 'tok-1')?.data?.mode, 'dangerous');
-  assert.equal(peekPendingAction(actions, 'tok-1'), null);
+  assert.equal(peekPendingAction(actions, 'tok-1', now + 1_000)?.kind, 'dangerous-mode');
+  assert.equal(consumePendingAction(actions, 'tok-1', now + 2_000)?.data?.mode, 'dangerous');
+  assert.equal(peekPendingAction(actions, 'tok-1', now + 3_000), null);
 });
 
 test('cleanupExpiredPendingActions prunes stale actions', () => {

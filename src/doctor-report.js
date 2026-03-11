@@ -3,6 +3,9 @@ export function buildDoctorSuggestions(checks = [], context = {}) {
     (Array.isArray(checks) ? checks : []).map((item) => [String(item?.name || '').trim(), Boolean(item?.ok)]),
   );
   const suggestions = [];
+  const provider = String(context.provider || 'codex').trim().toLowerCase() === 'claude' ? 'claude' : 'codex';
+  const providerLabel = provider === 'claude' ? 'Claude Code' : 'Codex CLI';
+  const providerEnv = provider === 'claude' ? 'CLAUDE_BIN' : 'CODEX_BIN';
 
   const has = (name) => status.get(name) !== false;
   const add = (message) => {
@@ -20,8 +23,8 @@ export function buildDoctorSuggestions(checks = [], context = {}) {
     add('检查 `.env` 里的 `QQBOT_APP_ID` 和 `QQBOT_CLIENT_SECRET`，保存后重新执行 `npm run doctor`。');
   }
 
-  if (!has('Codex CLI binary')) {
-    add('安装 Codex CLI，或把 `CODEX_BIN` 指向可执行文件的绝对路径。');
+  if (!has(`${providerLabel} binary`)) {
+    add(`安装 ${providerLabel}，或把 \`${providerEnv}\` 指向可执行文件的绝对路径。`);
   }
 
   if (!has('Git binary')) {
